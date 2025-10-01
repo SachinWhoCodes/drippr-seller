@@ -1,100 +1,138 @@
-// imports
+// api/admin/products/create.ts
 import { getAdmin } from "../../_lib/firebaseAdmin.js";
 import { shopifyGraphQL } from "../../_lib/shopify.js";
 import { nanoid } from "nanoid";
 
+// 1) Create product (new API). You can also attach media here.
+const PRODUCT_CREATE = /* GraphQL */ `
+  mutation productCreate($product: ProductCreateInput!, $media: [CreateMediaInput!]) {
+    productCreate(product: $product, media: $media) {
+      product {
+        id
+        title
+        handle
+        status
+        variants(first: 5) {
+          nodes {
+            id
+            inventoryItem { id }
+          }
+        }
+      }
+      userErrors { field message }
+    }
+  }
+`;
+
+// 2) Update the (auto-created) default variant with price & SKU
+const VARIANTS_BULK_UPDATE = /* GraphQL */ `
+  mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+    productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+      productVariants { id }
+      userErrors { field message }
+    }
+  }
+`;
+
 export default async function handler(req: any, res: any) {
-  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Method not allowed" });
+  if (req.method !== "POST") {
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
+  }
 
   try {
     const { adminAuth, adminDb } = getAdmin();
 
+    // --- auth ---
     const authHeader = String(req.headers.authorization || "");
     const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
     if (!token) return res.status(401).json({ ok: false, error: "Missing Authorization" });
-
     const decoded = await adminAuth.verifyIdToken(token);
     const merchantId = decoded.uid;
 
+    // --- input ---
+    const body = req.body || {};
     const {
-      title, description, price,
+      title,
+      description, // plain text/HTML from your form
+      price,
       currency = "INR",
       tags = [],
-      resourceUrls = [],
+      resourceUrls = [], // staged upload resourceUrl(s) from /uploads/start
       vendor,
       productType,
-      status,
-      seo
-    } = req.body || {};
+      status, // "active" | "draft" from UI
+      seo,    // { title, description } optional
+    } = body;
 
-    if (!title || !price) return res.status(400).json({ ok: false, error: "title and price are required" });
-
-    const PRODUCT_CREATE = `
-      mutation ProductCreate($input: ProductInput!) {
-        productCreate(input: $input) {
-          product {
-            id title handle tags productType vendor status
-            variants(first: 10) { nodes { id sku inventoryItem { id } } }
-          }
-          userErrors { field message }
-        }
-      }
-    `;
-    const METAFIELDS_SET = `
-      mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
-        metafieldsSet(metafields: $metafields) {
-          metafields { id namespace key }
-          userErrors { field message }
-        }
-      }
-    `;
-    const PRODUCT_CREATE_MEDIA = `
-      mutation productCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
-        productCreateMedia(productId: $productId, media: $media) {
-          media { id status preview { image { url } } }
-          mediaUserErrors { field message code }
-        }
-      }
-    `;
-
-    const merchantProductId = `mp_${nanoid(10)}`;
-    const shopifyTags = [...new Set([`merchant:${merchantId}`, ...tags])];
-    const shopifyStatus = status ? String(status).toUpperCase() : undefined;
-
-    const createRes = await shopifyGraphQL(PRODUCT_CREATE, {
-      input: {
-        title,
-        bodyHtml: description || "",
-        vendor: vendor || "DRIPPR Marketplace",
-        productType: productType || undefined,
-        tags: shopifyTags,
-        variants: [{ price: String(price), sku: merchantProductId }],
-        status: shopifyStatus,
-        seo: seo || undefined,
-      },
-    });
-
-    const product = createRes.data.productCreate.product;
-    const variant = product.variants.nodes[0];
-
-    await shopifyGraphQL(METAFIELDS_SET, {
-      metafields: [
-        { ownerId: product.id, namespace: "marketplace", key: "merchant_id", type: "single_line_text_field", value: merchantId },
-        { ownerId: product.id, namespace: "marketplace", key: "merchant_product_id", type: "single_line_text_field", value: merchantProductId },
-      ],
-    });
-
-    if (Array.isArray(resourceUrls) && resourceUrls.length) {
-      const media = resourceUrls.slice(0, 10).map((url: string) => ({
-        originalSource: url,
-        mediaContentType: "IMAGE",
-      }));
-      const mediaRes = await shopifyGraphQL(PRODUCT_CREATE_MEDIA, { productId: product.id, media });
-      if (mediaRes.data.productCreateMedia.mediaUserErrors?.length) {
-        console.warn("mediaUserErrors", mediaRes.data.productCreateMedia.mediaUserErrors);
-      }
+    if (!title || price == null) {
+      return res.status(400).json({ ok: false, error: "title and price are required" });
     }
 
+    // --- build ProductCreateInput ---
+    const merchantProductId = `mp_${nanoid(10)}`;
+    const shopifyTags = [...new Set([`merchant:${merchantId}`, ...tags])];
+    const shopifyStatus = status ? String(status).toUpperCase() : undefined; // ACTIVE | DRAFT | ARCHIVED
+
+    const productInput = {
+      title,
+      descriptionHtml: description || "",             // ⬅️ replaces bodyHtml
+      vendor: vendor || "DRIPPR Marketplace",
+      productType: productType || undefined,
+      status: shopifyStatus,                          // ProductStatus enum
+      seo: seo || undefined,                          // {title, description}
+      tags: shopifyTags,
+      // No "variants" here in 2025-01
+      // No "productOptions" => Shopify will create a single default variant
+    };
+
+    // Optionally attach media at creation time
+    const mediaInput = Array.isArray(resourceUrls) && resourceUrls.length
+      ? resourceUrls.slice(0, 10).map((u: string) => ({
+          originalSource: u,
+          mediaContentType: "IMAGE" as const,
+        }))
+      : undefined;
+
+    // --- create product ---
+    const createRes = await shopifyGraphQL(PRODUCT_CREATE, {
+      product: productInput,
+      media: mediaInput,
+    });
+
+    const userErrors = createRes.data?.productCreate?.userErrors || [];
+    if (userErrors.length) {
+      return res.status(400).json({ ok: false, error: userErrors.map((e: any) => e.message).join("; ") });
+    }
+
+    const product = createRes.data.productCreate.product;
+    const firstVariant = product?.variants?.nodes?.[0];
+    if (!product?.id || !firstVariant?.id) {
+      throw new Error("Product created but default variant not returned.");
+    }
+
+    // --- set price + SKU on default variant ---
+    const variantsPayload = [
+      {
+        id: firstVariant.id,
+        price: String(price),
+        inventoryItem: {
+          sku: merchantProductId,
+        },
+      },
+    ];
+
+    const updateRes = await shopifyGraphQL(VARIANTS_BULK_UPDATE, {
+      productId: product.id,
+      variants: variantsPayload,
+    });
+
+    const vErrors = updateRes.data?.productVariantsBulkUpdate?.userErrors || [];
+    if (vErrors.length) {
+      // Non-fatal — still persist product but surface warning
+      console.warn("productVariantsBulkUpdate errors:", vErrors);
+    }
+
+    // --- persist mirror in Firestore ---
     const now = Date.now();
     const docRef = adminDb.collection("merchantProducts").doc();
     await docRef.set({
@@ -104,24 +142,24 @@ export default async function handler(req: any, res: any) {
       description: description || "",
       price: Number(price),
       currency,
-      status: shopifyStatus?.toLowerCase() || "active",
+      status: (shopifyStatus || "ACTIVE").toLowerCase(),
       sku: merchantProductId,
       shopifyProductId: product.id,
-      shopifyVariantIds: [variant.id],
+      shopifyVariantIds: [firstVariant.id],
       tags: shopifyTags,
       imageUrls: resourceUrls || [],
-      inventoryQty: null,
-      createdAt: now,
-      updatedAt: now,
+      inventoryQty: null, // set later via inventory mutations if you need
       vendor: vendor || "DRIPPR Marketplace",
       productType: productType || null,
+      createdAt: now,
+      updatedAt: now,
     });
 
     return res.status(200).json({
       ok: true,
-      merchantProductId,
       productId: product.id,
-      variantId: variant.id,
+      variantId: firstVariant.id,
+      merchantProductId,
       firestoreId: docRef.id,
     });
   } catch (e: any) {
