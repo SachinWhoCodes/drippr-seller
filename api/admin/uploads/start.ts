@@ -1,12 +1,24 @@
-// imports
+// api/admin/uploads/start.ts
 import { getAdmin } from "../../_lib/firebaseAdmin.js";
 import { shopifyGraphQL } from "../../_lib/shopify.js";
+
+const STAGED_UPLOADS_CREATE = `
+mutation stagedUploadsCreate($input: [StagedUploadInput!]!) {
+  stagedUploadsCreate(input: $input) {
+    stagedTargets {
+      url
+      resourceUrl
+      parameters { name value }
+    }
+    userErrors { field message }
+  }
+}
+`;
 
 export default async function handler(req: any, res: any) {
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Method not allowed" });
 
   try {
-    // lazy init + auth
     const { adminAuth } = getAdmin();
 
     const authHeader = String(req.headers.authorization || "");
@@ -19,20 +31,12 @@ export default async function handler(req: any, res: any) {
       return res.status(400).json({ ok: false, error: "No files provided" });
     }
 
-    const STAGED_UPLOADS_CREATE = `
-      mutation stagedUploadsCreate($input: [StagedUploadInput!]!) {
-        stagedUploadsCreate(input: $input) {
-          stagedTargets { url resourceUrl parameters { name value } }
-          userErrors { field message }
-        }
-      }
-    `;
-
+    // 🔧 fileSize MUST be a STRING for Shopify UnsignedInt64
     const input = files.map((f: any) => ({
       resource: "IMAGE",
-      filename: f.filename,
-      mimeType: f.mimeType || "image/jpeg",
-      fileSize: Number(f.fileSize),
+      filename: String(f.filename || "image.jpg"),
+      mimeType: String(f.mimeType || "image/jpeg"),
+      fileSize: String(f.fileSize),   // <<— key fix
       httpMethod: "POST",
     }));
 
