@@ -1,6 +1,6 @@
 // /api/admin/products/create.ts
-import { adminAuth, adminDb } from "../../_lib/firebaseAdmin";
-import { shopifyGraphQL } from "../../_lib/shopify";
+import { adminAuth, adminDb } from "../../_lib/firebaseAdmin.js";
+import { shopifyGraphQL } from "../../_lib/shopify.js";
 import { nanoid } from "nanoid";
 
 const PRODUCT_CREATE = `

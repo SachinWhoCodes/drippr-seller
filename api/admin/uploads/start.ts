@@ -1,6 +1,6 @@
 // /api/admin/uploads/start.ts
-import { adminAuth } from "../../_lib/firebaseAdmin";
-import { shopifyGraphQL } from "../../_lib/shopify";
+import { adminAuth } from "../../_lib/firebaseAdmin.js";
+import { shopifyGraphQL } from "../../_lib/shopify.js";
 
 const STAGED_UPLOADS_CREATE = `
 mutation stagedUploadsCreate($input: [StagedUploadInput!]!) {
