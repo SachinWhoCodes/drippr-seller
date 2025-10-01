@@ -1,5 +1,4 @@
 // /api/admin/products/create.ts
-import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { adminAuth, adminDb } from "../../_lib/firebaseAdmin";
 import { shopifyGraphQL } from "../../_lib/shopify";
 import { nanoid } from "nanoid";
@@ -43,7 +42,7 @@ mutation productCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
 }
 `;
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
+export default async function handler(req: any, res: any) {
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Method not allowed" });
 
   try {

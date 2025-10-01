@@ -1,7 +1,7 @@
 {
   "extends": "../tsconfig.json",
   "compilerOptions": {
-    "types": ["node", "@vercel/node"],
+    "types": ["node"],
     "skipLibCheck": true
   },
   "include": ["**/*.ts"]

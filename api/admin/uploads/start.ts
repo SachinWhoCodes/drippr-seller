@@ -1,5 +1,4 @@
 // /api/admin/uploads/start.ts
-import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { adminAuth } from "../../_lib/firebaseAdmin";
 import { shopifyGraphQL } from "../../_lib/shopify";
 
@@ -16,7 +15,7 @@ mutation stagedUploadsCreate($input: [StagedUploadInput!]!) {
 }
 `;
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
+export default async function handler(req: any, res: any) {
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Method not allowed" });
 
   try {
