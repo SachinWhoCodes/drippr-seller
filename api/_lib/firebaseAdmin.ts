@@ -1,13 +1,9 @@
 // api/_lib/firebaseAdmin.ts
-import * as admin from "firebase-admin";
-
-let app: admin.app.App | null = null;
+import { getApps, getApp, initializeApp, cert } from "firebase-admin/app";
+import { getAuth } from "firebase-admin/auth";
+import { getFirestore } from "firebase-admin/firestore";
 
 export function getAdmin() {
-  if (app) {
-    return { adminAuth: admin.auth(), adminDb: admin.firestore() };
-  }
-
   const projectId = process.env.FIREBASE_PROJECT_ID;
   const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
   const rawKey = process.env.FIREBASE_PRIVATE_KEY;
@@ -20,9 +16,16 @@ export function getAdmin() {
 
   const privateKey = rawKey.includes("\\n") ? rawKey.replace(/\\n/g, "\n") : rawKey;
 
-  app = admin.initializeApp({
-    credential: admin.credential.cert({ projectId, clientEmail, privateKey }),
-  });
+  if (!getApps().length) {
+    initializeApp({
+      credential: cert({ projectId, clientEmail, privateKey }),
+    });
+  } else {
+    getApp();
+  }
 
-  return { adminAuth: admin.auth(), adminDb: admin.firestore() };
+  return {
+    adminAuth: getAuth(),
+    adminDb: getFirestore(),
+  };
 }
