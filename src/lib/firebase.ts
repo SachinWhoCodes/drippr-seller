@@ -26,4 +26,11 @@ export const auth = getAuth(app);
 export const db = getFirestore(app);
 export const storage = getStorage(app);
 
+
+
 export { onAuthStateChanged, GoogleAuthProvider };
+
+
+// expose for ad-hoc admin actions in DevTools
+// (remove later when done)
+;(window as any).auth = auth;
