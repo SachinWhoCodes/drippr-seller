@@ -3,7 +3,7 @@ import { getAdmin } from "../../_lib/firebaseAdmin.js";
 import { shopifyGraphQL } from "../../_lib/shopify.js";
 import { nanoid } from "nanoid";
 
-// 1) Create product (new API). You can also attach media here.
+// 1) Create product and (optionally) attach images
 const PRODUCT_CREATE = /* GraphQL */ `
   mutation productCreate($product: ProductCreateInput!, $media: [CreateMediaInput!]) {
     productCreate(product: $product, media: $media) {
@@ -24,7 +24,7 @@ const PRODUCT_CREATE = /* GraphQL */ `
   }
 `;
 
-// 2) Update the (auto-created) default variant with price & SKU
+// 2) Update default variant (price, compareAtPrice, barcode, weight, inventoryItem.*)
 const VARIANTS_BULK_UPDATE = /* GraphQL */ `
   mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
     productVariantsBulkUpdate(productId: $productId, variants: $variants) {
@@ -49,56 +49,54 @@ export default async function handler(req: any, res: any) {
     const decoded = await adminAuth.verifyIdToken(token);
     const merchantId = decoded.uid;
 
-    // --- input ---
+    // --- input from the React form ---
     const body = req.body || {};
     const {
       title,
-      description, // plain text/HTML from your form
-      price,
+      description,                 // plain text/HTML
+      price,                       // required
+      compareAtPrice,              // optional
+      barcode,                     // optional
+      weightGrams,                 // optional number (grams)
+      inventory = {},              // { quantity?, tracked?, cost? }
       currency = "INR",
       tags = [],
-      resourceUrls = [], // staged upload resourceUrl(s) from /uploads/start
+      resourceUrls = [],           // staged upload resourceUrl(s)
       vendor,
       productType,
-      status, // "active" | "draft" from UI
-      seo,    // { title, description } optional
+      status,                      // 'active' | 'draft'
+      seo,                         // { title?, description? }
     } = body;
 
     if (!title || price == null) {
       return res.status(400).json({ ok: false, error: "title and price are required" });
     }
 
-    // --- build ProductCreateInput ---
     const merchantProductId = `mp_${nanoid(10)}`;
     const shopifyTags = [...new Set([`merchant:${merchantId}`, ...tags])];
     const shopifyStatus = status ? String(status).toUpperCase() : undefined; // ACTIVE | DRAFT | ARCHIVED
 
     const productInput = {
       title,
-      descriptionHtml: description || "",             // ⬅️ replaces bodyHtml
+      descriptionHtml: description || "",
       vendor: vendor || "DRIPPR Marketplace",
       productType: productType || undefined,
-      status: shopifyStatus,                          // ProductStatus enum
-      seo: seo || undefined,                          // {title, description}
+      status: shopifyStatus,
+      seo: seo || undefined, // { title?, description? }
       tags: shopifyTags,
-      // No "variants" here in 2025-01
-      // No "productOptions" => Shopify will create a single default variant
+      // Let Shopify create the single default variant
     };
 
-    // Optionally attach media at creation time
-    const mediaInput = Array.isArray(resourceUrls) && resourceUrls.length
-      ? resourceUrls.slice(0, 10).map((u: string) => ({
-          originalSource: u,
-          mediaContentType: "IMAGE" as const,
-        }))
-      : undefined;
+    const mediaInput =
+      Array.isArray(resourceUrls) && resourceUrls.length
+        ? resourceUrls.slice(0, 10).map((u: string) => ({
+            originalSource: u,
+            mediaContentType: "IMAGE" as const,
+          }))
+        : undefined;
 
-    // --- create product ---
-    const createRes = await shopifyGraphQL(PRODUCT_CREATE, {
-      product: productInput,
-      media: mediaInput,
-    });
-
+    // --- 1) create product ---
+    const createRes = await shopifyGraphQL(PRODUCT_CREATE, { product: productInput, media: mediaInput });
     const userErrors = createRes.data?.productCreate?.userErrors || [];
     if (userErrors.length) {
       return res.status(400).json({ ok: false, error: userErrors.map((e: any) => e.message).join("; ") });
@@ -110,13 +108,24 @@ export default async function handler(req: any, res: any) {
       throw new Error("Product created but default variant not returned.");
     }
 
-    // --- set price + SKU on default variant ---
-    const variantsPayload = [
+    // --- 2) update default variant with all feasible fields ---
+    const variantsPayload: any[] = [
       {
         id: firstVariant.id,
         price: String(price),
-        inventoryItem: {           // ✅ SKU belongs here
-          sku: merchantProductId,
+        ...(compareAtPrice != null && compareAtPrice !== ""
+          ? { compareAtPrice: String(compareAtPrice) }
+          : {}),
+        ...(barcode ? { barcode } : {}),
+        ...(weightGrams
+          ? { weight: Number(weightGrams), weightUnit: "GRAMS" }
+          : {}),
+        inventoryItem: {
+          sku: merchantProductId,                         // our traceable sku
+          ...(typeof inventory.tracked === "boolean" ? { tracked: Boolean(inventory.tracked) } : {}),
+          ...(inventory.cost != null && inventory.cost !== ""
+            ? { cost: String(inventory.cost) }            // Decimal string
+            : {}),
         },
       },
     ];
@@ -125,17 +134,23 @@ export default async function handler(req: any, res: any) {
       productId: product.id,
       variants: variantsPayload,
     });
-
     const vErrors = updateRes.data?.productVariantsBulkUpdate?.userErrors || [];
-    if (vErrors.length) {
-      // Non-fatal — still persist product but surface warning
-      console.warn("productVariantsBulkUpdate errors:", vErrors);
-    }
+    if (vErrors.length) console.warn("productVariantsBulkUpdate errors:", vErrors);
 
-    // --- persist mirror in Firestore ---
+    // NOTE: Setting absolute inventory quantity on Shopify requires a location ID
+    // and a separate mutation (inventorySetOnHandQuantities / inventoryAdjustQuantities).
+    // We’ll store the requested quantity locally for now and can wire the Shopify
+    // location-based update when you’re ready.
+
+    // --- 3) mirror in Firestore for the seller panel ---
     const now = Date.now();
     const docRef = adminDb.collection("merchantProducts").doc();
     const numericVariantId = String(firstVariant.id).split("/").pop();
+
+    // Keep field names your UI reads: image/images
+    const images = Array.isArray(resourceUrls) ? resourceUrls : [];
+    const image = images[0] || null;
+
     await docRef.set({
       id: docRef.id,
       merchantId,
@@ -143,14 +158,17 @@ export default async function handler(req: any, res: any) {
       description: description || "",
       price: Number(price),
       currency,
-      status: (shopifyStatus || "ACTIVE").toLowerCase(),
+      status: (shopifyStatus || "ACTIVE").toLowerCase(), // 'active' | 'draft'
       sku: merchantProductId,
       shopifyProductId: product.id,
       shopifyVariantIds: [firstVariant.id],
       shopifyVariantNumericIds: [numericVariantId],
       tags: shopifyTags,
-      imageUrls: resourceUrls || [],
-      inventoryQty: null, // set later via inventory mutations if you need
+      // For compatibility with your table rendering:
+      image,                 // thumbnail
+      images,                // array for gallery
+      imageUrls: images,     // (kept too, in case other code already uses it)
+      stock: inventory?.quantity ?? null, // saved locally; not yet pushed to Shopify location
       vendor: vendor || "DRIPPR Marketplace",
       productType: productType || null,
       createdAt: now,
