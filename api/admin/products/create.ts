@@ -113,19 +113,13 @@ export default async function handler(req: any, res: any) {
       {
         id: firstVariant.id,
         price: String(price),
-        ...(compareAtPrice != null && compareAtPrice !== ""
-          ? { compareAtPrice: String(compareAtPrice) }
-          : {}),
+        ...(compareAtPrice != null ? { compareAtPrice: String(compareAtPrice) } : {}),
         ...(barcode ? { barcode } : {}),
-        ...(weightGrams
-          ? { weight: Number(weightGrams), weightUnit: "GRAMS" }
-          : {}),
+        // ⛔️ omit weight / weightUnit in productVariantsBulkUpdate for 2025-01
         inventoryItem: {
-          sku: merchantProductId,                         // our traceable sku
+          sku: merchantProductId,
           ...(typeof inventory.tracked === "boolean" ? { tracked: Boolean(inventory.tracked) } : {}),
-          ...(inventory.cost != null && inventory.cost !== ""
-            ? { cost: String(inventory.cost) }            // Decimal string
-            : {}),
+          ...(inventory.cost != null && inventory.cost !== "" ? { cost: String(inventory.cost) } : {}),
         },
       },
     ];
