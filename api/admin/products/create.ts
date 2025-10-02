@@ -115,9 +115,7 @@ export default async function handler(req: any, res: any) {
       {
         id: firstVariant.id,
         price: String(price),
-        inventoryItem: {
-          sku: merchantProductId,
-        },
+        sku: merchantProductId,        // <-- set Variant.sku (not inventoryItem.sku)
       },
     ];
 
@@ -135,6 +133,7 @@ export default async function handler(req: any, res: any) {
     // --- persist mirror in Firestore ---
     const now = Date.now();
     const docRef = adminDb.collection("merchantProducts").doc();
+    const numericVariantId = String(firstVariant.id).split("/").pop();
     await docRef.set({
       id: docRef.id,
       merchantId,
@@ -146,6 +145,7 @@ export default async function handler(req: any, res: any) {
       sku: merchantProductId,
       shopifyProductId: product.id,
       shopifyVariantIds: [firstVariant.id],
+      shopifyVariantNumericIds: [numericVariantId],
       tags: shopifyTags,
       imageUrls: resourceUrls || [],
       inventoryQty: null, // set later via inventory mutations if you need
