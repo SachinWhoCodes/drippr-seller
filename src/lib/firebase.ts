@@ -33,4 +33,5 @@ export { onAuthStateChanged, GoogleAuthProvider };
 
 // expose for ad-hoc admin actions in DevTools
 // (remove later when done)
+if (typeof window !== "undefined") (window as any).__auth = auth;
 ;(window as any).auth = auth;
