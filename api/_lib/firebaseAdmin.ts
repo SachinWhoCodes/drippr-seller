@@ -17,9 +17,9 @@ export function getAdmin() {
   const privateKey = rawKey.includes("\\n") ? rawKey.replace(/\\n/g, "\n") : rawKey;
 
   if (!getApps().length) {
-    initializeApp({
-      credential: cert({ projectId, clientEmail, privateKey }),
-    });
+    const app = initializeApp({ credential: cert({ projectId, clientEmail, privateKey }) });
+    const db = getFirestore(app);
+    db.settings({ ignoreUndefinedProperties: true } as any);
   } else {
     getApp();
   }
