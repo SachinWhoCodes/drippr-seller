@@ -115,7 +115,9 @@ export default async function handler(req: any, res: any) {
       {
         id: firstVariant.id,
         price: String(price),
-        sku: merchantProductId,        // <-- set Variant.sku (not inventoryItem.sku)
+        inventoryItem: {           // ✅ SKU belongs here
+          sku: merchantProductId,
+        },
       },
     ];
 
