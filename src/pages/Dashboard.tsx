@@ -5,6 +5,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { DollarSign, Package, ShoppingCart, TrendingUp } from "lucide-react";
 import { auth, db } from "@/lib/firebase";
+import { statusText, getStatusColor } from "@/lib/orderStatus";
+
+
 import {
   collection,
   doc,
@@ -213,6 +216,7 @@ export default function Dashboard() {
                     <div className="flex items-center gap-2">
                       <p className="font-semibold">{order.orderNumber || order.id}</p>
                       <Badge className={getStatusColor(order)}>{statusText(order)}</Badge>
+                     
                     </div>
                     <p className="text-sm text-muted-foreground">
                       {new Date(order.createdAt).toLocaleString()}
