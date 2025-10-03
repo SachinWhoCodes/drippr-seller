@@ -308,7 +308,7 @@ export default function Analytics() {
                     </div>
                     <div className="text-right">
                       <p className="text-xl font-bold text-success">{money(p.revenue)}</p>
-                      <p className="text-xs text-muted-foreground">Total Revenue</p>
+                      <p className="text-xs text-muted-foreground">Total Revenue </p>
                     </div>
                   </div>
                 ))}
