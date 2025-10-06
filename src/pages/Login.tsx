@@ -30,8 +30,8 @@ export default function Login() {
     } catch (err: any) {
       console.error(err);
       // Check for wrong password error
-      if (err?.code === "auth/wrong-password") {
-        setModalMsg("Incorrect password. Please try again.");
+      if (err?.code === "auth/invalid-credential") {
+        setModalMsg("Incorrect credential. Please try again.");
         setModalOpen(true);
         setTimeout(() => setModalOpen(false), 3000);
       } else {
