@@ -12,6 +12,9 @@ export default function Login() {
   const navigate = useNavigate();
   const loc = useLocation();
   const [busy, setBusy] = useState(false);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [modalMsg, setModalMsg] = useState("");
+
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -26,7 +29,14 @@ export default function Login() {
       navigate((loc.state as any)?.from?.pathname || "/dashboard", { replace: true });
     } catch (err: any) {
       console.error(err);
-      toast.error(err?.message || "Login failed.");
+      // Check for wrong password error
+      if (err?.code === "auth/wrong-password") {
+        setModalMsg("Incorrect password. Please try again.");
+        setModalOpen(true);
+        setTimeout(() => setModalOpen(false), 3000);
+      } else {
+        toast.error(err?.message || "Login failed.");
+      }
     } finally {
       setBusy(false);
     }
@@ -49,6 +59,22 @@ export default function Login() {
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-hero p-4 py-12">
+
+      {/* Modal */}
+      {modalOpen && (
+        <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-40 z-50">
+          <div className="bg-white rounded-lg shadow-lg p-6 min-w-[300px] text-center">
+            <p className="mb-4">{modalMsg}</p>
+            <button
+              className="bg-primary text-white px-4 py-2 rounded"
+              onClick={() => setModalOpen(false)}
+            >
+              Okay!
+            </button>
+          </div>
+        </div>
+      )}
+
       <Card className="w-full max-w-md">
         <CardHeader className="text-center">
           <div className="mx-auto mb-4 h-12 w-12 rounded-lg bg-primary flex items-center justify-center text-primary-foreground font-bold text-2xl">
