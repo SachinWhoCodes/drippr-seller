@@ -2,6 +2,8 @@
 export type Merchant = {
   id: string;                // same as Firebase auth uid
   email: string;
+  phone: string;
+  businessName: string;
   displayName?: string;
   status: "active" | "blocked";
   kycStatus?: "pending" | "verified" | "rejected";

@@ -20,7 +20,9 @@ export default function Register() {
     const form = new FormData(e.currentTarget);
     const email = String(form.get("email") || "").trim();
     const password = String(form.get("password") || "").trim();
+    const phone = String(form.get("phone") || "").trim();
     const name = String(form.get("name") || "").trim();
+    const business_name = String(form.get("business-name") || "").trim();
 
     if (!email || !password || !name) {
       toast.error("Please fill name, email and password.");
@@ -34,6 +36,8 @@ export default function Register() {
 
       const merchant: Omit<Merchant, "id" | "createdAt"> = {
         email,
+        phone,
+        businessName: business_name,
         displayName: name,
         status: "active",
         kycStatus: "pending",
@@ -79,6 +83,14 @@ export default function Register() {
               <div>
                 <Label htmlFor="password">Password</Label>
                 <Input id="password" name="password" type="password" required />
+              </div>
+              <div>
+                <Label htmlFor="phone">Phone Number</Label>
+                <Input id="phone" name="phone" type="phone" placeholder="1234567890" required />
+              </div>
+              <div>
+                <Label htmlFor="business-name">Business Name</Label>
+                <Input id="business-name" name="business-name" type="business-name" required />
               </div>
               <div>
                 <Label htmlFor="business-type">Business Type</Label>
