@@ -12,56 +12,38 @@ import Products from "./pages/Products";
 import Orders from "./pages/Orders";
 import Payments from "./pages/Payments";
 import Analytics from "./pages/Analytics";
+import SellerSupportAI from "./pages/SellerSupportAI";
 import Support from "./pages/Support";
 import Settings from "./pages/Settings";
 import NotFound from "./pages/NotFound";
-import { AuthProvider } from "@/providers/AuthProvider";
-import RequireAuth from "@/components/RequireAuth";
 
 const queryClient = new QueryClient();
 
 const App = () => (
   <QueryClientProvider client={queryClient}>
-  <TooltipProvider delayDuration={0}>
-    <AuthProvider>
+    <TooltipProvider>
+      <Toaster />
+      <Sonner />
       <BrowserRouter>
         <Routes>
-          {/* public */}
           <Route path="/" element={<Landing />} />
           <Route path="/login" element={<Login />} />
           <Route path="/register" element={<Register />} />
           <Route path="/password-reset" element={<PasswordReset />} />
-
-          {/* protected */}
-          <Route path="/dashboard" element={
-            <RequireAuth><Dashboard /></RequireAuth>
-          } />
-          <Route path="/dashboard/products" element={
-            <RequireAuth><Products /></RequireAuth>
-          } />
-          <Route path="/dashboard/orders" element={
-            <RequireAuth><Orders /></RequireAuth>
-          } />
-          <Route path="/dashboard/payments" element={
-            <RequireAuth><Payments /></RequireAuth>
-          } />
-          <Route path="/dashboard/analytics" element={
-            <RequireAuth><Analytics /></RequireAuth>
-          } />
-          <Route path="/dashboard/support" element={
-            <RequireAuth><Support /></RequireAuth>
-          } />
-          <Route path="/dashboard/settings" element={
-            <RequireAuth><Settings /></RequireAuth>
-          } />
-
-          {/* catch-all */}
+          <Route path="/dashboard" element={<Dashboard />} />
+          <Route path="/dashboard/products" element={<Products />} />
+          <Route path="/dashboard/orders" element={<Orders />} />
+          <Route path="/dashboard/payments" element={<Payments />} />
+          <Route path="/dashboard/analytics" element={<Analytics />} />
+          <Route path="/dashboard/seller-support-ai" element={<SellerSupportAI />} />
+          <Route path="/dashboard/support" element={<Support />} />
+          <Route path="/dashboard/settings" element={<Settings />} />
+          {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />
         </Routes>
       </BrowserRouter>
-    </AuthProvider>
-  </TooltipProvider>
-</QueryClientProvider>
+    </TooltipProvider>
+  </QueryClientProvider>
 );
 
 export default App;

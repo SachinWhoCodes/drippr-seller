@@ -11,7 +11,8 @@ import {
   Menu,
   Bell,
   User,
-  LogOut
+  LogOut,
+  MessageSquare
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -35,6 +36,7 @@ const navigation = [
   { name: "Orders", href: "/dashboard/orders", icon: ShoppingCart },
   { name: "Payments", href: "/dashboard/payments", icon: Wallet },
   { name: "Analytics", href: "/dashboard/analytics", icon: BarChart3 },
+  { name: "Seller Support AI", href: "/dashboard/seller-support-ai", icon: MessageSquare },
   { name: "Support", href: "/dashboard/support", icon: HelpCircle },
   { name: "Settings", href: "/dashboard/settings", icon: Settings },
 ];
