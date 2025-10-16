@@ -87,6 +87,10 @@ export default function Support() {
     try {
       setSubmitting(true);
       const colRef = collection(db, "supportRequests");
+
+      // Generate a client-side timestamp for use inside the array
+      const clientTimestamp = new Date();
+
       await addDoc(colRef, {
         merchantId: uid,
         name: name.trim() || merchantName || "Unknown",
@@ -96,12 +100,14 @@ export default function Support() {
         message: message.trim(),
         priority,
         status: "pending",
-        adminReply: "", // stays empty until admin answers
+        adminReply: "",
+        // These top-level fields CAN and SHOULD use serverTimestamp()
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
+        // For the array, use the client-generated timestamp
         timeline: [
-          { at: serverTimestamp(), by: "seller", type: "created", message: message.trim() },
-          { at: serverTimestamp(), by: "system", type: "status", status: "pending", message: "Ticket created" },
+          { at: clientTimestamp, by: "seller", type: "created", message: message.trim() },
+          { at: clientTimestamp, by: "system", type: "status", status: "pending", message: "Ticket created" },
         ],
       } as Omit<Ticket, "id">);
 
@@ -219,8 +225,8 @@ export default function Support() {
                     <MessageCircle className="h-5 w-5 text-primary" />
                   </div>
                   <div>
-                    <p className="font-medium">Live Chat</p>
-                    <p className="text-sm text-muted-foreground">Mon-Fri, 9AM-6PM</p>
+                    <p className="font-medium">Ticket Response</p>
+                    <p className="text-sm text-muted-foreground">Within 2-6 hours</p>
                   </div>
                 </div>
               </CardContent>
