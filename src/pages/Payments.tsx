@@ -274,7 +274,7 @@ export default function Payments() {
               </div>
               {/* Optional: link to Settings */}
               <p className="text-xs text-muted-foreground">
-                Update bank details in <a href="/settings" className="underline">Settings</a>.
+                Update bank details in <a href="/dashboard/settings" className="underline">Settings</a>.
               </p>
             </div>
           </CardContent>

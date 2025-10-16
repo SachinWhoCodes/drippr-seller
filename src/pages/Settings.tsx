@@ -9,8 +9,32 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
 
 import { auth, db } from "@/lib/firebase";
-import { onAuthStateChanged, EmailAuthProvider, reauthenticateWithCredential, updatePassword } from "firebase/auth";
+import {
+  onAuthStateChanged,
+  EmailAuthProvider,
+  reauthenticateWithCredential,
+  updatePassword,
+} from "firebase/auth";
 import { doc, onSnapshot, setDoc } from "firebase/firestore";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+
+// -------- Types --------
+type BankDetails = {
+  accountHolder?: string;
+  bankName?: string;
+  accountNumber?: string; // keep as string
+  ifsc?: string;
+  upi?: string; // optional alternative payout
+  accountType?: "SAVINGS" | "CURRENT";
+  payoutMethod?: "BANK" | "UPI";
+  updatedAt?: number;
+};
 
 type MerchantDoc = {
   uid: string;
@@ -22,14 +46,14 @@ type MerchantDoc = {
   businessCategory?: string;
   gstin?: string;
   address?: string;
+  bank?: BankDetails; // <-- new
 };
 
 export default function Settings() {
-  // Auth
+  // ---------- Auth ----------
   const [uid, setUid] = useState<string | null>(auth.currentUser?.uid ?? null);
   const [authEmail, setAuthEmail] = useState<string | null>(auth.currentUser?.email ?? null);
   const joinDateText = useMemo(() => {
-    // prefer Auth createdAt if available
     const createdAt = auth.currentUser?.metadata?.creationTime
       ? new Date(auth.currentUser.metadata.creationTime).toLocaleDateString()
       : null;
@@ -44,7 +68,7 @@ export default function Settings() {
     return () => unsub();
   }, []);
 
-  // Live Merchant doc
+  // ---------- Live Merchant doc ----------
   const [loadingDoc, setLoadingDoc] = useState(true);
   const [merchant, setMerchant] = useState<MerchantDoc | null>(null);
 
@@ -57,7 +81,8 @@ export default function Settings() {
         const data = (snap.data() as MerchantDoc | undefined) || null;
         setMerchant(data);
         setLoadingDoc(false);
-        // hydrate forms if empty
+
+        // hydrate forms if user hasn't started typing yet
         if (data && !dirtyProfile) {
           setName(data.name || "");
           setPhone(data.phone || "");
@@ -68,6 +93,15 @@ export default function Settings() {
           setGstin(data.gstin || "");
           setAddress(data.address || "");
         }
+        if (data?.bank && !dirtyBank) {
+          setAccountHolder(data.bank.accountHolder || "");
+          setBankName(data.bank.bankName || "");
+          setAccountNumber(data.bank.accountNumber || "");
+          setIfsc(data.bank.ifsc || "");
+          setUpi(data.bank.upi || "");
+          setAccountType((data.bank.accountType as any) || "SAVINGS");
+          setPayoutMethod((data.bank.payoutMethod as any) || "BANK");
+        }
       },
       () => setLoadingDoc(false)
     );
@@ -75,10 +109,9 @@ export default function Settings() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [uid]);
 
-  // ---------- Profile form ----------
+  // ========== PROFILE ==========
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
-  // flags so we don't overwrite user typing when snapshot arrives
   const [dirtyProfile, setDirtyProfile] = useState(false);
   const [savingProfile, setSavingProfile] = useState(false);
 
@@ -97,7 +130,6 @@ export default function Settings() {
           name: name.trim(),
           phone: phone.trim(),
           updatedAt: Date.now(),
-          // set createdAt if doc is new
           ...(merchant ? {} : { createdAt: Date.now() }),
         },
         { merge: true }
@@ -112,7 +144,7 @@ export default function Settings() {
     }
   };
 
-  // ---------- Store form ----------
+  // ========== STORE ==========
   const [storeName, setStoreName] = useState("");
   const [businessCategory, setBusinessCategory] = useState("");
   const [gstin, setGstin] = useState("");
@@ -149,7 +181,7 @@ export default function Settings() {
     }
   };
 
-  // ---------- Change password ----------
+  // ========== PASSWORD ==========
   const [currentPw, setCurrentPw] = useState("");
   const [newPw, setNewPw] = useState("");
   const [confirmPw, setConfirmPw] = useState("");
@@ -164,10 +196,8 @@ export default function Settings() {
 
     try {
       setChangingPw(true);
-      // Re-authenticate with current password
       const cred = EmailAuthProvider.credential(authEmail, currentPw);
       await reauthenticateWithCredential(user, cred);
-      // Update password
       await updatePassword(user, newPw);
       setCurrentPw("");
       setNewPw("");
@@ -187,6 +217,83 @@ export default function Settings() {
     }
   };
 
+  // ========== BANK / PAYOUTS ==========
+  const [accountHolder, setAccountHolder] = useState("");
+  const [bankName, setBankName] = useState("");
+  const [accountNumber, setAccountNumber] = useState("");
+  const [ifsc, setIfsc] = useState("");
+  const [upi, setUpi] = useState("");
+  const [accountType, setAccountType] = useState<"SAVINGS" | "CURRENT">("SAVINGS");
+  const [payoutMethod, setPayoutMethod] = useState<"BANK" | "UPI">("BANK");
+
+  const [dirtyBank, setDirtyBank] = useState(false);
+  const [savingBank, setSavingBank] = useState(false);
+
+  function normalizeIfsc(v: string) {
+    return v.toUpperCase().replace(/\s+/g, "");
+  }
+
+  function validateBankForm() {
+    if (payoutMethod === "BANK") {
+      if (!accountHolder.trim()) return "Account holder is required.";
+      if (!bankName.trim()) return "Bank name is required.";
+      if (!accountNumber.trim()) return "Account number is required.";
+      const onlyDigits = accountNumber.replace(/\s+/g, "");
+      if (!/^\d{6,20}$/.test(onlyDigits)) return "Account number should be 6–20 digits.";
+      if (!ifsc.trim()) return "IFSC is required.";
+      const IFSC = normalizeIfsc(ifsc);
+      // Standard IFSC pattern: 4 letters + 0 + 6 alphanumeric
+      if (!/^[A-Z]{4}0[A-Z0-9]{6}$/.test(IFSC)) return "Invalid IFSC format.";
+    } else {
+      if (!upi.trim()) return "UPI ID is required for UPI payouts.";
+      // very loose UPI validation
+      if (!/^[a-z0-9.\-_]{2,}@[a-z]{2,}$/i.test(upi.trim())) return "Invalid UPI ID.";
+    }
+    return null;
+  }
+
+  const handleSaveBank = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!uid) return toast.error("Please sign in again.");
+
+    const err = validateBankForm();
+    if (err) {
+      toast.error(err);
+      return;
+    }
+
+    try {
+      setSavingBank(true);
+      const ref = doc(db, "merchants", uid);
+      await setDoc(
+        ref,
+        {
+          uid,
+          bank: {
+            accountHolder: accountHolder.trim(),
+            bankName: bankName.trim(),
+            accountNumber: accountNumber.trim().replace(/\s+/g, ""),
+            ifsc: normalizeIfsc(ifsc),
+            upi: upi.trim() || undefined,
+            accountType,
+            payoutMethod,
+            updatedAt: Date.now(),
+          } as BankDetails,
+          updatedAt: Date.now(),
+          ...(merchant ? {} : { createdAt: Date.now(), email: authEmail ?? null }),
+        },
+        { merge: true }
+      );
+      toast.success("Payout details saved!");
+      setDirtyBank(false);
+    } catch (e: any) {
+      console.error(e);
+      toast.error(e?.message || "Failed to save payout details");
+    } finally {
+      setSavingBank(false);
+    }
+  };
+
   return (
     <DashboardLayout>
       <div className="space-y-6">
@@ -199,10 +306,11 @@ export default function Settings() {
           <TabsList>
             <TabsTrigger value="profile">Profile</TabsTrigger>
             <TabsTrigger value="store">Store Details</TabsTrigger>
+            <TabsTrigger value="bank">Bank / Payouts</TabsTrigger>
             <TabsTrigger value="password">Password</TabsTrigger>
           </TabsList>
 
-          {/* Profile Tab */}
+          {/* Profile */}
           <TabsContent value="profile">
             <Card>
               <CardHeader>
@@ -227,12 +335,7 @@ export default function Settings() {
                     </div>
                     <div className="space-y-2">
                       <Label htmlFor="email">Email</Label>
-                      <Input
-                        id="email"
-                        type="email"
-                        value={authEmail || ""}
-                        disabled
-                      />
+                      <Input id="email" type="email" value={authEmail || ""} disabled />
                     </div>
                   </div>
 
@@ -264,7 +367,7 @@ export default function Settings() {
             </Card>
           </TabsContent>
 
-          {/* Store Tab */}
+          {/* Store */}
           <TabsContent value="store">
             <Card>
               <CardHeader>
@@ -338,7 +441,147 @@ export default function Settings() {
             </Card>
           </TabsContent>
 
-          {/* Password Tab */}
+          {/* Bank / Payouts */}
+          <TabsContent value="bank">
+            <Card>
+              <CardHeader>
+                <CardTitle>Bank / Payout Details</CardTitle>
+                <CardDescription>
+                  Choose your payout method and add the required details.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <form onSubmit={handleSaveBank} className="space-y-4">
+                  {/* Payout method */}
+                  <div className="space-y-2">
+                    <Label>Payout Method</Label>
+                    <Select
+                      value={payoutMethod}
+                      onValueChange={(v) => {
+                        setPayoutMethod(v as "BANK" | "UPI");
+                        setDirtyBank(true);
+                      }}
+                      disabled={!uid || loadingDoc || savingBank}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select method" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="BANK">Bank Transfer</SelectItem>
+                        <SelectItem value="UPI">UPI</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  {/* BANK fields */}
+                  {payoutMethod === "BANK" && (
+                    <>
+                      <div className="grid sm:grid-cols-2 gap-4">
+                        <div className="space-y-2">
+                          <Label htmlFor="accountHolder">Account Holder</Label>
+                          <Input
+                            id="accountHolder"
+                            placeholder="Full name as per bank"
+                            value={accountHolder}
+                            onChange={(e) => {
+                              setAccountHolder(e.target.value);
+                              setDirtyBank(true);
+                            }}
+                            disabled={!uid || loadingDoc || savingBank}
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="bankName">Bank Name</Label>
+                          <Input
+                            id="bankName"
+                            placeholder="e.g., HDFC Bank"
+                            value={bankName}
+                            onChange={(e) => {
+                              setBankName(e.target.value);
+                              setDirtyBank(true);
+                            }}
+                            disabled={!uid || loadingDoc || savingBank}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid sm:grid-cols-2 gap-4">
+                        <div className="space-y-2">
+                          <Label htmlFor="accountNumber">Account Number</Label>
+                          <Input
+                            id="accountNumber"
+                            placeholder="e.g., 123456789012"
+                            value={accountNumber}
+                            onChange={(e) => {
+                              setAccountNumber(e.target.value);
+                              setDirtyBank(true);
+                            }}
+                            disabled={!uid || loadingDoc || savingBank}
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="ifsc">IFSC</Label>
+                          <Input
+                            id="ifsc"
+                            placeholder="e.g., HDFC0001234"
+                            value={ifsc}
+                            onChange={(e) => {
+                              setIfsc(e.target.value.toUpperCase());
+                              setDirtyBank(true);
+                            }}
+                            disabled={!uid || loadingDoc || savingBank}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label>Account Type</Label>
+                        <Select
+                          value={accountType}
+                          onValueChange={(v) => {
+                            setAccountType(v as "SAVINGS" | "CURRENT");
+                            setDirtyBank(true);
+                          }}
+                          disabled={!uid || loadingDoc || savingBank}
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="SAVINGS">Savings</SelectItem>
+                            <SelectItem value="CURRENT">Current</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </>
+                  )}
+
+                  {/* UPI field */}
+                  {payoutMethod === "UPI" && (
+                    <div className="space-y-2">
+                      <Label htmlFor="upi">UPI ID</Label>
+                      <Input
+                        id="upi"
+                        placeholder="name@bank"
+                        value={upi}
+                        onChange={(e) => {
+                          setUpi(e.target.value);
+                          setDirtyBank(true);
+                        }}
+                        disabled={!uid || loadingDoc || savingBank}
+                      />
+                    </div>
+                  )}
+
+                  <Button type="submit" disabled={!uid || savingBank}>
+                    {savingBank ? "Saving…" : "Save Payout Details"}
+                  </Button>
+                </form>
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          {/* Password */}
           <TabsContent value="password">
             <Card>
               <CardHeader>
