@@ -10,6 +10,10 @@ async function readRawBody(req: any): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
+// small helper
+const chunk = <T,>(arr: T[], size: number) =>
+  Array.from({ length: Math.ceil(arr.length / size) }, (_, i) => arr.slice(i * size, i * size + size));
+
 export default async function handler(req: any, res: any) {
   if (req.method !== "POST") return res.status(405).send("Method not allowed");
 
@@ -32,7 +36,8 @@ export default async function handler(req: any, res: any) {
     const shopifyOrderId = String(payload.id);
     const orderNumber = payload.name || payload.order_number || shopifyOrderId;
     const createdAt = payload.created_at ? new Date(payload.created_at).getTime() : Date.now();
-    const currency = payload.currency || (payload.total_price_set?.shop_money?.currency_code ?? "INR");
+    const currency =
+      payload.currency || (payload.total_price_set?.shop_money?.currency_code ?? "INR");
     const financialStatus = payload.financial_status || "pending";
     const lineItems = Array.isArray(payload.line_items) ? payload.line_items : [];
 
@@ -54,9 +59,6 @@ export default async function handler(req: any, res: any) {
     const skuToProduct = new Map<string, any>();
     const variantNumToProduct = new Map<string, any>();
 
-    const chunk = <T,>(arr: T[], size: number) =>
-      Array.from({ length: Math.ceil(arr.length / size) }, (_, i) => arr.slice(i * size, i * size + size));
-
     // a) match by SKU (we set variant.sku = mp_xxx)
     for (const part of chunk([...new Set(skus)], 10)) {
       if (!part.length) continue;
@@ -64,16 +66,19 @@ export default async function handler(req: any, res: any) {
       snap.forEach((doc) => skuToProduct.set(doc.get("sku"), { id: doc.id, ...doc.data() }));
     }
 
-    // b) fallback: match by variant_id (REST numeric) we stored as shopifyVariantNumericIds
+    // b) fallback: match by variant_id (REST numeric) stored as shopifyVariantNumericIds
     for (const part of chunk([...new Set(variantNums)], 10)) {
       if (!part.length) continue;
       const snap = await adminDb
         .collection("merchantProducts")
         .where("shopifyVariantNumericIds", "array-contains-any", part)
         .get();
+
       snap.forEach((doc) => {
-        const data = { id: doc.id, ...doc.data() };
-        for (const n of data.shopifyVariantNumericIds || []) {
+        // ✅ read the array in a typed way; avoids TS error
+        const ids = (doc.get("shopifyVariantNumericIds") as (string | number)[] | undefined) ?? [];
+        const data = { id: doc.id, ...doc.data() }; // can be 'any' safely for spreading
+        for (const n of ids) {
           variantNumToProduct.set(String(n), data);
         }
       });
@@ -125,7 +130,9 @@ export default async function handler(req: any, res: any) {
         lineItems: group.items,
         subtotal: Number(group.subtotal.toFixed(2)),
         status: "open",
-        raw: payload.customer ? { customer: { id: payload.customer.id, email: payload.customer.email } } : {},
+        raw: payload.customer
+          ? { customer: { id: payload.customer.id, email: payload.customer.email } }
+          : {},
       });
 
       const statsRef = adminDb.collection("merchantStats").doc(merchantId);
@@ -143,7 +150,6 @@ export default async function handler(req: any, res: any) {
 
     await batch.commit();
 
-    // Optional: annotate event with match info for debugging
     if (byMerchant.size === 0) await eventRef.update({ note: "no matching mp items" });
 
     return res.status(200).send("ok");
