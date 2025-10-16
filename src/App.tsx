@@ -49,7 +49,7 @@ const App = () => (
           <Route path="/dashboard/analytics" element={
             <RequireAuth><Analytics /></RequireAuth>
           } />
-          <Route path="/dashboard/sellersupportai" element={
+          <Route path="/dashboard/seller-support-ai" element={
             <RequireAuth><SellerSupportAI /></RequireAuth>
           } />
           <Route path="/dashboard/support" element={
