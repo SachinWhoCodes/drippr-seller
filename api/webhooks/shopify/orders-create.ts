@@ -69,20 +69,25 @@ export default async function handler(req: any, res: any) {
     // b) fallback: match by variant_id (REST numeric) stored as shopifyVariantNumericIds
     for (const part of chunk([...new Set(variantNums)], 10)) {
       if (!part.length) continue;
+
       const snap = await adminDb
         .collection("merchantProducts")
         .where("shopifyVariantNumericIds", "array-contains-any", part)
         .get();
 
       snap.forEach((doc) => {
-        // ✅ read the array in a typed way; avoids TS error
+        // ✅ Read the array in a typed way so TS is happy
         const ids = (doc.get("shopifyVariantNumericIds") as (string | number)[] | undefined) ?? [];
-        const data = { id: doc.id, ...doc.data() }; // can be 'any' safely for spreading
+
+        // It's fine to keep the rest as 'any' for spreading
+        const data = { id: doc.id, ...(doc.data() as any) };
+
         for (const n of ids) {
           variantNumToProduct.set(String(n), data);
         }
       });
     }
+
 
     // 5) Group line items by merchant
     const byMerchant = new Map<string, { items: any[]; subtotal: number }>();
