@@ -118,7 +118,6 @@ export default function Merchants() {
   }
 
   return (
-    <DashboardLayout>
       <div className="space-y-4">
         {/* Search */}
         <Card>
@@ -282,6 +281,5 @@ export default function Merchants() {
           </SheetContent>
         </Sheet>
       </div>
-    </DashboardLayout>
   );
 }

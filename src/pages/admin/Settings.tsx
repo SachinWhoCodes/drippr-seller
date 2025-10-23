@@ -65,6 +65,10 @@ export default function AdminSettings() {
             <span className="font-medium">Production</span>
           </div>
           <div className="flex justify-between">
+            <span className="text-muted-foreground">Developer:</span>
+            <span className="font-medium">Sachin Verma, SWE Intern</span>
+          </div>
+          <div className="flex justify-between">
             <span className="text-muted-foreground">Last Updated:</span>
             <span className="font-medium">{new Date().toLocaleDateString()}</span>
           </div>
