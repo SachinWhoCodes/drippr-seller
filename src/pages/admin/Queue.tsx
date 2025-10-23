@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listQueueProducts, approveProduct, rejectProduct } from "@/lib/adminApi";
 import { QueueProduct } from "@/types/admin";
 import { Card, CardContent } from "@/components/ui/card";
@@ -6,117 +6,144 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
+  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
+  Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle,
 } from "@/components/ui/sheet";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
-import { Search, Eye, CheckCircle, XCircle } from "lucide-react";
+import { Search, Eye, CheckCircle, XCircle, RefreshCcw } from "lucide-react";
 import { VariantDraftPreview } from "@/components/VariantDraftPreview";
+
+const PLACEHOLDER = "https://placehold.co/96x96?text=IMG";
+
+type StatusFilter = "in_review" | "draft" | "all";
 
 export default function ProductQueue() {
   const [products, setProducts] = useState<QueueProduct[]>([]);
   const [loading, setLoading] = useState(true);
-  const [status, setStatus] = useState("in_review");
+  const [actionBusy, setActionBusy] = useState(false);
+
+  const [status, setStatus] = useState<StatusFilter>("in_review");
   const [search, setSearch] = useState("");
+  const [q, setQ] = useState(""); // debounced search term
+  const searchTimer = useRef<number | null>(null);
+
   const [selectedProduct, setSelectedProduct] = useState<QueueProduct | null>(null);
   const [rejectDialogOpen, setRejectDialogOpen] = useState(false);
   const [rejectReason, setRejectReason] = useState("");
 
-  const fetchProducts = async () => {
+  // Debounce search input -> q
+  useEffect(() => {
+    if (searchTimer.current) window.clearTimeout(searchTimer.current);
+    searchTimer.current = window.setTimeout(() => setQ(search.trim()), 300);
+    return () => {
+      if (searchTimer.current) window.clearTimeout(searchTimer.current);
+    };
+  }, [search]);
+
+  const fetchProducts = useCallback(async () => {
     setLoading(true);
-    const res = await listQueueProducts({ status, q: search });
-    if (res.ok) {
-      setProducts(res.items);
+    try {
+      const res = await listQueueProducts({ status, q });
+      if (res.ok) setProducts(res.items);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
-  };
+  }, [status, q]);
 
   useEffect(() => {
     fetchProducts();
-  }, [status, search]);
+  }, [fetchProducts]);
 
   const handleApprove = async (product: QueueProduct) => {
-    await approveProduct(product.id);
-    toast.success(`${product.title} approved and published!`);
-    setSelectedProduct(null);
-    fetchProducts();
+    try {
+      setActionBusy(true);
+      await approveProduct(product.id);
+      toast.success(`${product.title} approved and published!`);
+      setSelectedProduct(null);
+      fetchProducts();
+    } catch (e: any) {
+      toast.error(e?.message || "Failed to approve product");
+    } finally {
+      setActionBusy(false);
+    }
   };
 
   const handleReject = async () => {
-    if (!selectedProduct || !rejectReason.trim()) return;
-    await rejectProduct(selectedProduct.id, rejectReason);
-    toast.error(`${selectedProduct.title} rejected.`);
-    setRejectDialogOpen(false);
-    setSelectedProduct(null);
-    setRejectReason("");
-    fetchProducts();
+    if (!selectedProduct) return;
+    if (!rejectReason.trim()) return toast.error("Please provide a reason.");
+    try {
+      setActionBusy(true);
+      await rejectProduct(selectedProduct.id, rejectReason.trim());
+      toast.success(`${selectedProduct.title} rejected.`);
+      setRejectDialogOpen(false);
+      setSelectedProduct(null);
+      setRejectReason("");
+      fetchProducts();
+    } catch (e: any) {
+      toast.error(e?.message || "Failed to reject product");
+    } finally {
+      setActionBusy(false);
+    }
   };
 
-  const getStatusBadge = (status: string) => {
+  const getStatusBadge = (s: string) => {
     const variants: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
       in_review: "default",
       draft: "secondary",
       active: "outline",
       rejected: "destructive",
     };
-    return <Badge variant={variants[status] || "default"}>{status}</Badge>;
+    return <Badge variant={variants[s] || "default"} className="capitalize">{s.replace("_", " ")}</Badge>;
   };
+
+  const headerRight = useMemo(() => {
+    return (
+      <div className="flex flex-col md:flex-row gap-4">
+        <Select value={status} onValueChange={(v) => setStatus(v as StatusFilter)}>
+          <SelectTrigger className="w-full md:w-48">
+            <SelectValue placeholder="Status" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="in_review">In Review</SelectItem>
+            <SelectItem value="draft">Draft</SelectItem>
+            <SelectItem value="all">All Status</SelectItem>
+          </SelectContent>
+        </Select>
+
+        <div className="relative flex-1">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Input
+            placeholder="Search by title or merchant..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="pl-9"
+          />
+        </div>
+
+        <Button variant="outline" onClick={fetchProducts} disabled={loading}>
+          <RefreshCcw className="h-4 w-4 mr-2" />
+          Refresh
+        </Button>
+      </div>
+    );
+  }, [status, search, loading, fetchProducts]);
 
   return (
     <div className="space-y-4">
       {/* Filters */}
       <Card>
         <CardContent className="pt-6">
-          <div className="flex flex-col md:flex-row gap-4">
-            <Select value={status} onValueChange={setStatus}>
-              <SelectTrigger className="w-full md:w-48">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="in_review">In Review</SelectItem>
-                <SelectItem value="draft">Draft</SelectItem>
-                <SelectItem value="all">All Status</SelectItem>
-              </SelectContent>
-            </Select>
-
-            <div className="relative flex-1">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-              <Input
-                placeholder="Search by title or merchant..."
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="pl-9"
-              />
-            </div>
-          </div>
+          {headerRight}
         </CardContent>
       </Card>
 
@@ -125,9 +152,13 @@ export default function ProductQueue() {
         <CardContent className="pt-6">
           {loading ? (
             <div className="space-y-2">
-              {[1, 2, 3].map((i) => (
+              {[1, 2, 3, 4, 5].map((i) => (
                 <Skeleton key={i} className="h-16 w-full" />
               ))}
+            </div>
+          ) : products.length === 0 ? (
+            <div className="text-center text-muted-foreground py-12">
+              No products found.
             </div>
           ) : (
             <Table>
@@ -142,26 +173,32 @@ export default function ProductQueue() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {products.map((product) => (
-                  <TableRow key={product.id}>
+                {products.map((p) => (
+                  <TableRow key={p.id}>
                     <TableCell>
                       <img
-                        src={product.image || "/placeholder.svg"}
-                        alt={product.title}
-                        className="w-12 h-12 object-cover rounded"
+                        src={p.image || p.images?.[0] || PLACEHOLDER}
+                        alt={p.title}
+                        className="w-12 h-12 object-cover rounded border bg-muted"
+                        onError={(e) => ((e.currentTarget as HTMLImageElement).src = PLACEHOLDER)}
                       />
                     </TableCell>
-                    <TableCell className="font-medium">{product.title}</TableCell>
-                    <TableCell>{product.merchant?.name || "-"}</TableCell>
+                    <TableCell className="font-medium">{p.title}</TableCell>
                     <TableCell>
-                      {new Date(product.createdAt).toLocaleDateString()}
+                      {p.merchant?.name || "-"}
+                      {p.merchant?.email ? (
+                        <span className="block text-xs text-muted-foreground">{p.merchant.email}</span>
+                      ) : null}
                     </TableCell>
-                    <TableCell>{getStatusBadge(product.status)}</TableCell>
+                    <TableCell>
+                      {p.createdAt ? new Date(p.createdAt).toLocaleDateString() : "-"}
+                    </TableCell>
+                    <TableCell>{getStatusBadge(p.status)}</TableCell>
                     <TableCell>
                       <Button
                         size="sm"
                         variant="outline"
-                        onClick={() => setSelectedProduct(product)}
+                        onClick={() => setSelectedProduct(p)}
                       >
                         <Eye className="h-4 w-4 mr-1" />
                         Review
@@ -181,9 +218,12 @@ export default function ProductQueue() {
           {selectedProduct && (
             <>
               <SheetHeader>
-                <SheetTitle>{selectedProduct.title}</SheetTitle>
+                <SheetTitle className="flex items-center justify-between">
+                  <span>{selectedProduct.title}</span>
+                  <span>{getStatusBadge(selectedProduct.status)}</span>
+                </SheetTitle>
                 <SheetDescription>
-                  Review product details and variants
+                  Review product details, images and the seller-provided variant draft.
                 </SheetDescription>
               </SheetHeader>
 
@@ -198,7 +238,8 @@ export default function ProductQueue() {
                           key={idx}
                           src={img}
                           alt={`${selectedProduct.title} ${idx + 1}`}
-                          className="w-full h-32 object-cover rounded border"
+                          className="w-full h-28 object-cover rounded border bg-muted"
+                          onError={(e) => ((e.currentTarget as HTMLImageElement).src = PLACEHOLDER)}
                         />
                       ))}
                     </div>
@@ -206,58 +247,57 @@ export default function ProductQueue() {
                 )}
 
                 {/* Details */}
-                <div className="space-y-2">
+                <div className="space-y-2 text-sm">
                   <div>
-                    <span className="font-semibold">Description:</span>
-                    <p className="text-sm text-muted-foreground">
-                      {selectedProduct.description || "No description"}
-                    </p>
+                    <span className="font-semibold">Merchant:</span>{" "}
+                    {selectedProduct.merchant?.name || "-"}{" "}
+                    {selectedProduct.merchant?.email ? `(${selectedProduct.merchant.email})` : ""}
                   </div>
                   <div>
-                    <span className="font-semibold">Price:</span> ₹
-                    {selectedProduct.price || "-"}
+                    <span className="font-semibold">Base Price:</span>{" "}
+                    {selectedProduct.price != null ? `₹${Number(selectedProduct.price).toLocaleString()}` : "-"}
                   </div>
                   <div>
                     <span className="font-semibold">Type:</span>{" "}
                     {selectedProduct.productType || "-"}
                   </div>
-                  <div>
-                    <span className="font-semibold">Merchant:</span>{" "}
-                    {selectedProduct.merchant?.name} ({selectedProduct.merchant?.email})
-                  </div>
                   {selectedProduct.tags && selectedProduct.tags.length > 0 && (
-                    <div>
-                      <span className="font-semibold">Tags:</span>
-                      <div className="flex gap-1 mt-1 flex-wrap">
-                        {selectedProduct.tags.map((tag, idx) => (
-                          <Badge key={idx} variant="secondary">
-                            {tag}
-                          </Badge>
-                        ))}
-                      </div>
+                    <div className="flex items-center gap-1 flex-wrap">
+                      <span className="font-semibold mr-1">Tags:</span>
+                      {selectedProduct.tags.map((tag, idx) => (
+                        <Badge key={idx} variant="secondary">{tag}</Badge>
+                      ))}
                     </div>
                   )}
+                  <div className="pt-2">
+                    <span className="font-semibold">Description:</span>
+                    <p className="text-muted-foreground whitespace-pre-wrap mt-1">
+                      {selectedProduct.description || "—"}
+                    </p>
+                  </div>
                 </div>
 
-                {/* Variant Draft */}
-                {selectedProduct.variantDraft && (
+                {/* Variant Draft (seller-provided options/values/prices) */}
+                {selectedProduct.variantDraft ? (
                   <VariantDraftPreview variantDraft={selectedProduct.variantDraft} />
+                ) : (
+                  <div className="text-sm text-muted-foreground">
+                    No variant draft provided by the seller.
+                  </div>
                 )}
 
-                {/* Admin Notes */}
-                <div>
-                  <h4 className="font-semibold mb-2">Internal Notes</h4>
-                  <Textarea
-                    placeholder="Add notes about this product (visible only to admins)..."
-                    rows={3}
-                    defaultValue={selectedProduct.adminNotes || ""}
-                  />
-                </div>
+                {/* Admin Notes (not persisted here; backend should accept it if needed) */}
+                {selectedProduct.adminNotes ? (
+                  <div className="text-xs text-muted-foreground">
+                    Existing notes: {selectedProduct.adminNotes}
+                  </div>
+                ) : null}
 
                 {/* Actions */}
                 <div className="flex gap-2 pt-4">
                   <Button
                     className="flex-1"
+                    disabled={actionBusy}
                     onClick={() => handleApprove(selectedProduct)}
                   >
                     <CheckCircle className="mr-2 h-4 w-4" />
@@ -266,6 +306,7 @@ export default function ProductQueue() {
                   <Button
                     variant="destructive"
                     className="flex-1"
+                    disabled={actionBusy}
                     onClick={() => setRejectDialogOpen(true)}
                   >
                     <XCircle className="mr-2 h-4 w-4" />
@@ -284,20 +325,27 @@ export default function ProductQueue() {
           <DialogHeader>
             <DialogTitle>Reject Product</DialogTitle>
             <DialogDescription>
-              Please provide a reason for rejecting this product.
+              Provide a reason for rejection. The seller can view this on their panel.
             </DialogDescription>
           </DialogHeader>
           <Textarea
-            placeholder="Reason for rejection..."
+            placeholder="Reason for rejection…"
             value={rejectReason}
             onChange={(e) => setRejectReason(e.target.value)}
             rows={4}
           />
           <DialogFooter>
-            <Button variant="outline" onClick={() => setRejectDialogOpen(false)}>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setRejectDialogOpen(false);
+                setRejectReason("");
+              }}
+              disabled={actionBusy}
+            >
               Cancel
             </Button>
-            <Button variant="destructive" onClick={handleReject}>
+            <Button variant="destructive" onClick={handleReject} disabled={actionBusy || !rejectReason.trim()}>
               Reject Product
             </Button>
           </DialogFooter>
