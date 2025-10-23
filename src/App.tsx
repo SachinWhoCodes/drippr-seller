@@ -18,6 +18,13 @@ import NotFound from "./pages/NotFound";
 import SellerSupportAI from "./pages/SellerSupportAI";
 import { AuthProvider } from "@/providers/AuthProvider";
 import RequireAuth from "@/components/RequireAuth";
+import { AdminGuard } from "./components/AdminGuard";
+import { AdminLayout } from "./components/AdminLayout";
+import AdminDashboard from "./pages/admin/Dashboard";
+import Merchants from "./pages/admin/Merchants";
+import ProductQueue from "./pages/admin/Queue";
+import AdminSettings from "./pages/admin/Settings";
+import AdminSupport from "./pages/admin/Support";
 
 const queryClient = new QueryClient();
 
@@ -58,6 +65,16 @@ const App = () => (
           <Route path="/dashboard/settings" element={
             <RequireAuth><Settings /></RequireAuth>
           } />
+
+
+          {/* Admin Routes */}
+          <Route path="/admin" element={<AdminGuard><AdminLayout /></AdminGuard>}>
+            <Route index element={<AdminDashboard />} />
+            <Route path="queue" element={<ProductQueue />} />
+            <Route path="merchants" element={<Merchants />} />
+            <Route path="support" element={<AdminSupport />} />
+            <Route path="settings" element={<AdminSettings />} />
+          </Route>
 
           {/* catch-all */}
           <Route path="*" element={<NotFound />} />
