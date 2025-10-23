@@ -1,3 +1,4 @@
+import { useEffect, useMemo, useState } from "react";
 import DashboardLayout from "@/components/DashboardLayout";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -16,7 +17,6 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { toast } from "sonner";
-import { useEffect, useMemo, useState } from "react";
 import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged } from "firebase/auth";
 import { collection, onSnapshot, orderBy, query, where } from "firebase/firestore";
@@ -32,13 +32,34 @@ type MerchantProduct = {
   title: string;
   price?: number;
   productType?: string;
-  status?: "active" | "draft";
+  status?: "active" | "draft" | "in_review";
   images?: string[];
   image?: string;
   createdAt?: number;
   sku?: string;
-  stock?: number; // optional, if you store it
+  stock?: number;
 };
+
+type VariantOption = { name: string; values: string[] };
+type VariantRow = {
+  id: string;
+  options: string[];     // [opt1Val, opt2Val?, opt3Val?]
+  title: string;         // "Red / M / Cotton"
+  price?: number;
+  compareAtPrice?: number;
+  sku?: string;
+  quantity?: number;
+  barcode?: string;
+  weightGrams?: number;
+};
+
+function cartesian<T>(arrs: T[][]): T[][] {
+  if (arrs.length === 0) return [];
+  return arrs.reduce<T[][]>(
+    (acc, curr) => acc.flatMap(a => curr.map(c => [...a, c])),
+    [[]]
+  );
+}
 
 export default function Products() {
   // ----- add form state -----
@@ -83,6 +104,92 @@ export default function Products() {
       `${p.title} ${p.productType ?? ""}`.toLowerCase().includes(s)
     );
   }, [products, search]);
+
+  // ====== Variants builder state ======
+  // Up to 3 options
+  const [options, setOptions] = useState<VariantOption[]>([
+    { name: "Size", values: [] },
+    { name: "Color", values: [] },
+  ]);
+
+  // Temp inputs for adding values quickly
+  const [valueInputs, setValueInputs] = useState<string[]>(["", "", ""]);
+
+  function setOptionName(idx: number, name: string) {
+    setOptions(prev => {
+      const next = [...prev];
+      if (!next[idx]) next[idx] = { name, values: [] };
+      next[idx] = { ...next[idx], name };
+      return next;
+    });
+  }
+  function addOptionRow() {
+    if (options.length >= 3) return;
+    setOptions(prev => [...prev, { name: `Option ${prev.length + 1}`, values: [] }]);
+    setValueInputs(prev => [...prev, ""]);
+  }
+  function removeOptionRow(idx: number) {
+    setOptions(prev => prev.filter((_, i) => i !== idx));
+    setValueInputs(prev => prev.filter((_, i) => i !== idx));
+    // also prune variantRows later via recompute
+  }
+  function addValue(idx: number) {
+    const raw = (valueInputs[idx] || "").trim();
+    if (!raw) return;
+    const values = raw
+      .split(",")
+      .map(s => s.trim())
+      .filter(Boolean);
+    setOptions(prev => {
+      const next = [...prev];
+      const existing = new Set(next[idx].values);
+      values.forEach(v => existing.add(v));
+      next[idx] = { ...next[idx], values: Array.from(existing) };
+      return next;
+    });
+    setValueInputs(prev => prev.map((v, i) => (i === idx ? "" : v)));
+  }
+  function removeValue(idx: number, value: string) {
+    setOptions(prev => {
+      const next = [...prev];
+      next[idx] = { ...next[idx], values: next[idx].values.filter(v => v !== value) };
+      return next;
+    });
+  }
+
+  // Generate combination rows from current options' values (1..3)
+  const comboKeys: string[][] = useMemo(() => {
+    const valueLists = options
+      .filter(o => (o?.name || "").trim() && o.values.length > 0)
+      .map(o => o.values);
+    if (valueLists.length === 0) return [];
+    return cartesian(valueLists);
+  }, [options]);
+
+  // Keep editable per-variant rows in state, keyed by "opt1|opt2|opt3"
+  const [variantRows, setVariantRows] = useState<Record<string, VariantRow>>({});
+  // re-seed rows when combos change (preserve existing edits)
+  useEffect(() => {
+    setVariantRows(prev => {
+      const next: Record<string, VariantRow> = {};
+      for (const combo of comboKeys) {
+        const key = combo.join("|");
+        const title = combo.join(" / ");
+        next[key] = prev[key] ?? {
+          id: key,
+          options: combo,
+          title,
+          price: undefined,
+          compareAtPrice: undefined,
+          sku: "",
+          quantity: undefined,
+          barcode: "",
+          weightGrams: undefined,
+        };
+      }
+      return next;
+    });
+  }, [comboKeys]);
 
   // ====== helpers ======
   const handleAddProduct = () => setIsAddProductOpen(true);
@@ -151,7 +258,7 @@ export default function Products() {
     const title = String(form.get("title") || "").trim();
     const description = String(form.get("description") || "").trim();
 
-    // variant / inventory fields
+    // variant / inventory fields for base/default
     const price = Number(form.get("price") || 0);
     const compareAtPrice = Number(form.get("compare-price") || 0) || undefined;
     const cost = Number(form.get("cost") || 0) || undefined;
@@ -190,26 +297,50 @@ export default function Products() {
         }
       }
 
-      // 2) create product (server handles Shopify Admin GraphQL/REST)
+      // 2) prepare variantDraft ONLY for admin (not sent to Shopify now)
+      const enabledOptions = options.filter(o => (o?.name || "").trim() && o.values.length > 0);
+      let variantDraft: undefined | {
+        options: VariantOption[];
+        variants: Omit<VariantRow, "id">[]; // server doesn’t need the local id
+      } = undefined;
+
+      if (enabledOptions.length > 0 && Object.keys(variantRows).length > 0) {
+        const variants = Object.values(variantRows).map(v => ({
+          options: v.options,
+          title: v.title,
+          price: v.price,
+          compareAtPrice: v.compareAtPrice,
+          sku: (v.sku || "").trim() || undefined,
+          quantity: v.quantity,
+          barcode: (v.barcode || "").trim() || undefined,
+          weightGrams: v.weightGrams,
+        }));
+        variantDraft = { options: enabledOptions, variants };
+      }
+
+      // 3) create product (server creates a single default variant on Shopify)
       const body = {
         title,
         description,
         price,
         compareAtPrice,
         barcode,
-        weightGrams, // server will map to variant.weight + weightUnit=GRAMS
+        weightGrams,
         inventory: {
-          quantity,                   // server can choose to adjust or just store
+          quantity,
           tracked: trackInventory === "yes",
-          cost,                       // maps to inventoryItem.cost
+          cost,
         },
         currency: "INR",
         tags,
         resourceUrls,
         vendor,
         productType,
+        // UI choice; server will coerce to DRAFT when variantDraft exists
         status: statusSel,
         seo: seoTitle || seoDescription ? { title: seoTitle, description: seoDescription } : undefined,
+        // NEW: store the seller-proposed variants for admin
+        variantDraft,
       };
 
       const createRes = await fetch("/api/admin/products/create", {
@@ -220,11 +351,16 @@ export default function Products() {
       const j = await createRes.json().catch(() => ({}));
       if (!createRes.ok || !j.ok) throw new Error(j.error || "Create product failed");
 
-      toast.success("Product created and synced with Shopify!");
+      toast.success("Product submitted for review. Admin will configure variants & publish.");
       setIsAddProductOpen(false);
       setSelectedImages([]);
       setImagePreviews([]);
       (e.target as HTMLFormElement).reset();
+
+      // reset options/variants builder
+      setOptions([{ name: "Size", values: [] }, { name: "Color", values: [] }]);
+      setValueInputs(["", "", ""]);
+      setVariantRows({});
     } catch (err: any) {
       console.error(err);
       toast.error(err?.message || "Failed to create product");
@@ -241,12 +377,12 @@ export default function Products() {
     <DashboardLayout>
       <div className="space-y-6">
         <Dialog open={isAddProductOpen} onOpenChange={setIsAddProductOpen}>
-          <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+          <DialogContent className="max-w-5xl max-h-[90vh] overflow-y-auto">
             <DialogHeader>
               <DialogTitle>Add New Product</DialogTitle>
             </DialogHeader>
 
-            <form onSubmit={handleSubmit} className="space-y-6">
+            <form onSubmit={handleSubmit} className="space-y-8">
               {/* Product Images */}
               <div className="space-y-2">
                 <Label>Product Images (Max 5)</Label>
@@ -281,13 +417,12 @@ export default function Products() {
                 </div>
               </div>
 
-              {/* Product Title */}
+              {/* Basic Info */}
               <div className="space-y-2">
                 <Label htmlFor="title">Product Title *</Label>
                 <Input id="title" name="title" placeholder="E.g., Premium Cotton T-Shirt" required />
               </div>
 
-              {/* Description */}
               <div className="space-y-2">
                 <Label htmlFor="description">Description *</Label>
                 <Textarea
@@ -300,45 +435,40 @@ export default function Products() {
               </div>
 
               <div className="grid grid-cols-2 gap-4">
-                {/* Price */}
+                {/* Base Price (used for default variant; admin can override per-variant later) */}
                 <div className="space-y-2">
-                  <Label htmlFor="price">Price (₹) *</Label>
+                  <Label htmlFor="price">Base Price (₹) *</Label>
                   <Input id="price" name="price" type="number" placeholder="999" min={0} step="0.01" required />
                 </div>
-                {/* Compare at Price */}
                 <div className="space-y-2">
-                  <Label htmlFor="compare-price">Compare at Price (₹)</Label>
+                  <Label htmlFor="compare-price">Base Compare at Price (₹)</Label>
                   <Input id="compare-price" name="compare-price" type="number" placeholder="1499" min={0} step="0.01" />
                 </div>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
-                {/* Cost per Item */}
                 <div className="space-y-2">
                   <Label htmlFor="cost">Cost per Item (₹)</Label>
                   <Input id="cost" name="cost" type="number" placeholder="500" min={0} step="0.01" />
                 </div>
-                {/* SKU (ignored, we auto-generate mp_* internally) */}
                 <div className="space-y-2">
                   <Label htmlFor="sku">SKU</Label>
-                  <Input id="sku" placeholder="(Auto-generated internally)" disabled />
+                  <Input id="sku" placeholder="(Auto-generated for the default variant)" disabled />
                 </div>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
-                {/* Barcode */}
                 <div className="space-y-2">
                   <Label htmlFor="barcode">Barcode (ISBN, UPC, etc.)</Label>
                   <Input id="barcode" name="barcode" placeholder="123456789" />
                 </div>
-                {/* Weight */}
                 <div className="space-y-2">
                   <Label htmlFor="weight">Weight (grams)</Label>
                   <Input id="weight" name="weight" type="number" placeholder="500" min={0} />
                 </div>
               </div>
 
-              {/* Inventory */}
+              {/* Inventory (base) */}
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label htmlFor="quantity">Quantity</Label>
@@ -358,29 +488,202 @@ export default function Products() {
                 </div>
               </div>
 
+              {/* Product meta */}
               <div className="grid grid-cols-2 gap-4">
-                {/* Product Type */}
                 <div className="space-y-2">
                   <Label htmlFor="product-type">Product Type</Label>
                   <Input id="product-type" name="product-type" placeholder="E.g., T-Shirts" />
                 </div>
-                {/* Vendor */}
                 <div className="space-y-2">
                   <Label htmlFor="vendor">Vendor</Label>
                   <Input id="vendor" name="vendor" placeholder="Brand name" />
                 </div>
               </div>
 
-              {/* Collections (not wired in API yet) */}
-              <div className="space-y-2">
-                <Label htmlFor="collections">Collections</Label>
-                <Input id="collections" placeholder="Summer, Featured, New Arrivals" />
-              </div>
-
-              {/* Tags */}
               <div className="space-y-2">
                 <Label htmlFor="tags">Tags (comma-separated)</Label>
                 <Input id="tags" name="tags" placeholder="casual, cotton, comfortable" />
+              </div>
+
+              {/* ===== Variants (for Admin) ===== */}
+              <div className="space-y-3 border-t pt-4">
+                <h3 className="font-semibold">Variants (optional, for admin to configure in Shopify)</h3>
+
+                {/* Options editor */}
+                <div className="grid gap-4">
+                  {options.map((opt, idx) => (
+                    <div key={idx} className="rounded-md border p-3 space-y-3">
+                      <div className="flex items-center gap-2">
+                        <Label className="min-w-[80px]">Option {idx + 1}</Label>
+                        <Input
+                          value={opt.name}
+                          onChange={(e) => setOptionName(idx, e.target.value)}
+                          placeholder={idx === 0 ? "Size" : idx === 1 ? "Color" : "Material"}
+                          className="max-w-xs"
+                        />
+                        {options.length > 1 && (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={() => removeOptionRow(idx)}
+                            className="ml-auto"
+                          >
+                            Remove
+                          </Button>
+                        )}
+                      </div>
+
+                      {/* Values pills */}
+                      <div className="flex flex-wrap gap-2">
+                        {opt.values.map((v) => (
+                          <Badge
+                            key={v}
+                            variant="outline"
+                            className="cursor-pointer"
+                            onClick={() => removeValue(idx, v)}
+                            title="Click to remove"
+                          >
+                            {v} <span className="ml-1 opacity-60">×</span>
+                          </Badge>
+                        ))}
+                      </div>
+
+                      {/* Add values */}
+                      <div className="flex items-center gap-2">
+                        <Input
+                          value={valueInputs[idx] || ""}
+                          onChange={(e) =>
+                            setValueInputs(prev => prev.map((v, i) => (i === idx ? e.target.value : v)))
+                          }
+                          placeholder="Enter values (comma separated), press Add"
+                        />
+                        <Button type="button" variant="secondary" onClick={() => addValue(idx)}>
+                          Add
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+
+                  {options.length < 3 && (
+                    <Button type="button" variant="outline" onClick={addOptionRow} className="w-fit">
+                      + Add another option
+                    </Button>
+                  )}
+                </div>
+
+                {/* Variants grid */}
+                {comboKeys.length > 0 && (
+                  <div className="space-y-2">
+                    <Label>Variant combinations</Label>
+                    <div className="overflow-x-auto rounded-md border">
+                      <table className="w-full text-sm">
+                        <thead className="bg-muted/50">
+                          <tr>
+                            <th className="text-left p-2">Variant</th>
+                            <th className="text-left p-2">Price (₹)</th>
+                            <th className="text-left p-2">Compare at (₹)</th>
+                            <th className="text-left p-2">SKU (optional)</th>
+                            <th className="text-left p-2">Qty</th>
+                            <th className="text-left p-2">Barcode</th>
+                            <th className="text-left p-2">Weight (g)</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {comboKeys.map((combo) => {
+                            const key = combo.join("|");
+                            const row = variantRows[key];
+                            return (
+                              <tr key={key} className="border-t">
+                                <td className="p-2">{row?.title || combo.join(" / ")}</td>
+                                <td className="p-2">
+                                  <Input
+                                    type="number"
+                                    min={0}
+                                    step="0.01"
+                                    value={row?.price ?? ""}
+                                    onChange={(e) =>
+                                      setVariantRows(prev => ({
+                                        ...prev,
+                                        [key]: { ...(prev[key]!), price: e.target.value ? Number(e.target.value) : undefined },
+                                      }))
+                                    }
+                                  />
+                                </td>
+                                <td className="p-2">
+                                  <Input
+                                    type="number"
+                                    min={0}
+                                    step="0.01"
+                                    value={row?.compareAtPrice ?? ""}
+                                    onChange={(e) =>
+                                      setVariantRows(prev => ({
+                                        ...prev,
+                                        [key]: { ...(prev[key]!), compareAtPrice: e.target.value ? Number(e.target.value) : undefined },
+                                      }))
+                                    }
+                                  />
+                                </td>
+                                <td className="p-2">
+                                  <Input
+                                    value={row?.sku ?? ""}
+                                    onChange={(e) =>
+                                      setVariantRows(prev => ({
+                                        ...prev,
+                                        [key]: { ...(prev[key]!), sku: e.target.value },
+                                      }))
+                                    }
+                                    placeholder="optional"
+                                  />
+                                </td>
+                                <td className="p-2">
+                                  <Input
+                                    type="number"
+                                    min={0}
+                                    value={row?.quantity ?? ""}
+                                    onChange={(e) =>
+                                      setVariantRows(prev => ({
+                                        ...prev,
+                                        [key]: { ...(prev[key]!), quantity: e.target.value ? Number(e.target.value) : undefined },
+                                      }))
+                                    }
+                                  />
+                                </td>
+                                <td className="p-2">
+                                  <Input
+                                    value={row?.barcode ?? ""}
+                                    onChange={(e) =>
+                                      setVariantRows(prev => ({
+                                        ...prev,
+                                        [key]: { ...(prev[key]!), barcode: e.target.value },
+                                      }))
+                                    }
+                                  />
+                                </td>
+                                <td className="p-2">
+                                  <Input
+                                    type="number"
+                                    min={0}
+                                    value={row?.weightGrams ?? ""}
+                                    onChange={(e) =>
+                                      setVariantRows(prev => ({
+                                        ...prev,
+                                        [key]: { ...(prev[key]!), weightGrams: e.target.value ? Number(e.target.value) : undefined },
+                                      }))
+                                    }
+                                  />
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      These variants are <b>not</b> sent to Shopify yet. Admin will create real Shopify variants based on this plan.
+                    </p>
+                  </div>
+                )}
               </div>
 
               {/* SEO */}
@@ -413,6 +716,9 @@ export default function Products() {
                     <SelectItem value="draft">Draft</SelectItem>
                   </SelectContent>
                 </Select>
+                <p className="text-xs text-muted-foreground">
+                  If variants are provided, the server will keep the Shopify product in <b>Draft</b> and mark it <b>In review</b>.
+                </p>
               </div>
 
               {/* Actions */}
@@ -429,7 +735,7 @@ export default function Products() {
                   Cancel
                 </Button>
                 <Button type="submit" disabled={busy}>
-                  {busy ? "Creating…" : "Add Product"}
+                  {busy ? "Submitting…" : "Submit for Review"}
                 </Button>
               </div>
             </form>
@@ -442,6 +748,9 @@ export default function Products() {
             <h2 className="text-3xl font-bold tracking-tight">Products</h2>
             <p className="text-muted-foreground">Manage your product inventory</p>
           </div>
+        </div>
+
+        <div className="flex justify-end">
           <Button onClick={handleAddProduct} className="gap-2">
             <Plus className="h-4 w-4" />
             Add Product
@@ -472,7 +781,6 @@ export default function Products() {
                     <TableHead>Product</TableHead>
                     <TableHead>Category</TableHead>
                     <TableHead>Price</TableHead>
-                    <TableHead>Stock</TableHead>
                     <TableHead>Status</TableHead>
                     <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
@@ -480,6 +788,14 @@ export default function Products() {
                 <TableBody>
                   {filtered.map((p) => {
                     const img = p.image || (p.images?.[0] ?? "");
+                    const statusClass =
+                      p.status === "active"
+                        ? "bg-success/10 text-success border-success/20"
+                        : p.status === "in_review"
+                        ? "bg-warning/10 text-warning border-warning/20"
+                        : "bg-muted text-muted-foreground border-muted";
+                    const statusText =
+                      p.status === "active" ? "Active" : p.status === "in_review" ? "In review" : "Draft";
                     return (
                       <TableRow key={p.id}>
                         <TableCell>
@@ -498,34 +814,9 @@ export default function Products() {
                           </div>
                         </TableCell>
                         <TableCell>{p.productType || "-"}</TableCell>
+                        <TableCell>{p.price != null ? `₹${Number(p.price).toLocaleString()}` : "-"}</TableCell>
                         <TableCell>
-                          {p.price != null ? `₹${Number(p.price).toLocaleString()}` : "-"}
-                        </TableCell>
-                        <TableCell>
-                          {p.stock == null ? "—" : (
-                            <span
-                              className={
-                                p.stock === 0
-                                  ? "text-destructive font-medium"
-                                  : p.stock < 50
-                                  ? "text-warning font-medium"
-                                  : ""
-                              }
-                            >
-                              {p.stock}
-                            </span>
-                          )}
-                        </TableCell>
-                        <TableCell>
-                          <Badge
-                            className={
-                              p.status === "active"
-                                ? "bg-success/10 text-success border-success/20"
-                                : "bg-muted text-muted-foreground border-muted"
-                            }
-                          >
-                            {p.status === "active" ? "Active" : "Draft"}
-                          </Badge>
+                          <Badge className={statusClass}>{statusText}</Badge>
                         </TableCell>
                         <TableCell className="text-right">
                           <div className="flex justify-end gap-2">
@@ -542,7 +833,7 @@ export default function Products() {
                   })}
                   {filtered.length === 0 && (
                     <TableRow>
-                      <TableCell colSpan={6} className="text-center text-muted-foreground">
+                      <TableCell colSpan={5} className="text-center text-muted-foreground">
                         No products yet.
                       </TableCell>
                     </TableRow>

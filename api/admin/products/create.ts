@@ -24,7 +24,7 @@ const PRODUCT_CREATE = /* GraphQL */ `
   }
 `;
 
-// 2) Update default variant (price, compareAtPrice, barcode, weight, inventoryItem.*)
+// 2) Update default variant (price, compareAtPrice, barcode, inventoryItem.*)
 const VARIANTS_BULK_UPDATE = /* GraphQL */ `
   mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
     productVariantsBulkUpdate(productId: $productId, variants: $variants) {
@@ -57,7 +57,7 @@ export default async function handler(req: any, res: any) {
       price,                       // required
       compareAtPrice,              // optional
       barcode,                     // optional
-      weightGrams,                 // optional number (grams)
+      weightGrams,                 // optional number (grams) - not sent to Shopify here
       inventory = {},              // { quantity?, tracked?, cost? }
       currency = "INR",
       tags = [],
@@ -66,15 +66,23 @@ export default async function handler(req: any, res: any) {
       productType,
       status,                      // 'active' | 'draft'
       seo,                         // { title?, description? }
+      // NEW: seller-proposed variants (NOT sent to Shopify now)
+      // { options: [{name, values:string[]}], variants: [{options[], title, price?, compareAtPrice?, sku?, quantity?, barcode?, weightGrams?}] }
+      variantDraft,
     } = body;
 
     if (!title || price == null) {
       return res.status(400).json({ ok: false, error: "title and price are required" });
     }
 
+    // --- Shopify side tagging / status ---
     const merchantProductId = `mp_${nanoid(10)}`;
     const shopifyTags = [...new Set([`merchant:${merchantId}`, ...tags])];
-    const shopifyStatus = status ? String(status).toUpperCase() : undefined; // ACTIVE | DRAFT | ARCHIVED
+
+    // If seller provided variant plan, FORCE DRAFT on Shopify
+    const shopifyStatus = variantDraft
+      ? "DRAFT"
+      : (status ? String(status).toUpperCase() : undefined); // ACTIVE | DRAFT | ARCHIVED
 
     const productInput = {
       title,
@@ -95,7 +103,7 @@ export default async function handler(req: any, res: any) {
           }))
         : undefined;
 
-    // --- 1) create product ---
+    // --- 1) create product on Shopify ---
     const createRes = await shopifyGraphQL(PRODUCT_CREATE, { product: productInput, media: mediaInput });
     const userErrors = createRes.data?.productCreate?.userErrors || [];
     if (userErrors.length) {
@@ -108,18 +116,18 @@ export default async function handler(req: any, res: any) {
       throw new Error("Product created but default variant not returned.");
     }
 
-    // --- 2) update default variant with all feasible fields ---
+    // --- 2) update default Shopify variant with feasible fields ---
     const variantsPayload: any[] = [
       {
         id: firstVariant.id,
         price: String(price),
         ...(compareAtPrice != null ? { compareAtPrice: String(compareAtPrice) } : {}),
         ...(barcode ? { barcode } : {}),
-        // ⛔️ omit weight / weightUnit in productVariantsBulkUpdate for 2025-01
+        // ⛔️ Avoid weight here (weight/weightUnit via this mutation isn’t stable across API versions).
         inventoryItem: {
-          sku: merchantProductId,
+          sku: merchantProductId, // traceable marketplace SKU
           ...(typeof inventory.tracked === "boolean" ? { tracked: Boolean(inventory.tracked) } : {}),
-          ...(inventory.cost != null && inventory.cost !== "" ? { cost: String(inventory.cost) } : {}),
+          ...(inventory?.cost != null && inventory.cost !== "" ? { cost: String(inventory.cost) } : {}),
         },
       },
     ];
@@ -131,19 +139,21 @@ export default async function handler(req: any, res: any) {
     const vErrors = updateRes.data?.productVariantsBulkUpdate?.userErrors || [];
     if (vErrors.length) console.warn("productVariantsBulkUpdate errors:", vErrors);
 
-    // NOTE: Setting absolute inventory quantity on Shopify requires a location ID
-    // and a separate mutation (inventorySetOnHandQuantities / inventoryAdjustQuantities).
-    // We’ll store the requested quantity locally for now and can wire the Shopify
-    // location-based update when you’re ready.
+    // NOTE: Absolute on-hand quantity requires a location-based mutation.
+    // We keep the requested quantity locally for now.
 
-    // --- 3) mirror in Firestore for the seller panel ---
+    // --- 3) mirror in Firestore for the seller/admin panels ---
     const now = Date.now();
     const docRef = adminDb.collection("merchantProducts").doc();
     const numericVariantId = String(firstVariant.id).split("/").pop();
 
-    // Keep field names your UI reads: image/images
     const images = Array.isArray(resourceUrls) ? resourceUrls : [];
     const image = images[0] || null;
+
+    // Status shown to seller:
+    // - if variantDraft exists => "in_review"
+    // - else mirror Shopify status (default to 'active')
+    const sellerStatus = variantDraft ? "in_review" : (shopifyStatus || "ACTIVE").toLowerCase();
 
     await docRef.set({
       id: docRef.id,
@@ -152,19 +162,23 @@ export default async function handler(req: any, res: any) {
       description: description || "",
       price: Number(price),
       currency,
-      status: (shopifyStatus || "ACTIVE").toLowerCase(), // 'active' | 'draft'
+      status: sellerStatus,                   // 'active' | 'draft' | 'in_review'
+      published: false,                       // admin will publish after variants are created
       sku: merchantProductId,
       shopifyProductId: product.id,
+      shopifyProductNumericId: String(product.id).split("/").pop(),
       shopifyVariantIds: [firstVariant.id],
       shopifyVariantNumericIds: [numericVariantId],
       tags: shopifyTags,
-      // For compatibility with your table rendering:
-      image,                 // thumbnail
-      images,                // array for gallery
-      imageUrls: images,     // (kept too, in case other code already uses it)
-      stock: inventory?.quantity ?? null, // saved locally; not yet pushed to Shopify location
+      image,                 // thumbnail for your table
+      images,                // gallery
+      imageUrls: images,     // kept for backwards compatibility
+      stock: inventory?.quantity ?? null, // local-only until you wire a Shopify location
       vendor: vendor || "DRIPPR Marketplace",
       productType: productType || null,
+      // NEW: store the seller-proposed variant plan for the admin panel
+      variantDraft: variantDraft || null,
+      adminNotes: null,
       createdAt: now,
       updatedAt: now,
     });
@@ -175,6 +189,7 @@ export default async function handler(req: any, res: any) {
       variantId: firstVariant.id,
       merchantProductId,
       firestoreId: docRef.id,
+      inReview: Boolean(variantDraft),
     });
   } catch (e: any) {
     console.error("create product error:", e?.message || e);
