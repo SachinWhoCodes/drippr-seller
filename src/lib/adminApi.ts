@@ -43,6 +43,28 @@ export function useIsAdmin(): boolean {
 }
 
 
+// --- Publication (Sales Channel) helpers ---
+
+/**
+ * Returns the Shopify Publication (sales channel) GraphQL ID to use when
+ * publishing products, or null if not configured.
+ *
+ * Set this in your env as VITE_SHOPIFY_PUBLICATION_ID, e.g.:
+ * gid://shopify/Publication/1234567890
+ */
+export function getLocalPublicationId(): string | null {
+  // Vite-style env vars:
+  const id =
+    (import.meta as any)?.env?.VITE_SHOPIFY_PUBLICATION_ID ??
+    (import.meta as any)?.env?.VITE_PUBLICATION_ID ??
+    "";
+
+  const trimmed = String(id || "").trim();
+  return trimmed ? trimmed : null;
+}
+
+
+
 async function call(action: string, payload: any = {}) {
   const u = auth.currentUser;
   if (!u) throw new Error("Not signed in");
