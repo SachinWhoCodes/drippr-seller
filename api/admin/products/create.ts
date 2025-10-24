@@ -153,8 +153,9 @@ export default async function handler(req: any, res: any) {
     // Status shown to seller:
     // - if variantDraft exists => "in_review"
     // - else mirror Shopify status (default to 'active')
-    const sellerStatus = variantDraft ? "in_review" : (shopifyStatus || "ACTIVE").toLowerCase();
-
+    // const sellerStatus = variantDraft ? "pending" : (shopifyStatus || "ACTIVE").toLowerCase();
+    const sellerStatus = "pending";
+    
     await docRef.set({
       id: docRef.id,
       merchantId,
