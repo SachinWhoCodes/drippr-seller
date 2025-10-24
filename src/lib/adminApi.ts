@@ -105,7 +105,7 @@ async function call(action: string, payload: any = {}) {
   if (!u) throw new Error("Not signed in");
   const idToken = await u.getIdToken(true);
 
-  const r = await fetch("/api/admin?action=" + encodeURIComponent(action), {
+  const r = await fetch("/api/admin/admin?action=" + encodeURIComponent(action), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
