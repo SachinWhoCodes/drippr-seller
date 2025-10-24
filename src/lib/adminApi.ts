@@ -1,4 +1,47 @@
-import { auth } from "@/lib/firebase";
+// --- Admin check hook (Firestore-based) ---
+import { useEffect, useState } from "react";
+import { onAuthStateChanged } from "firebase/auth";
+import { doc, onSnapshot } from "firebase/firestore";
+import { auth, db } from "@/lib/firebase";
+
+/**
+ * Returns true if the current user has an enabled admin record at:
+ *   admins/{uid} with { enabled: true }
+ * Falls back to false if signed out or document missing/disabled.
+ */
+export function useIsAdmin(): boolean {
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  useEffect(() => {
+    let unsubAdmin: (() => void) | undefined;
+
+    const unsubAuth = onAuthStateChanged(auth, (u) => {
+      // clear previous listener
+      if (unsubAdmin) {
+        unsubAdmin();
+        unsubAdmin = undefined;
+      }
+      if (!u) {
+        setIsAdmin(false);
+        return;
+      }
+      const ref = doc(db, "admins", u.uid);
+      unsubAdmin = onSnapshot(
+        ref,
+        (snap) => setIsAdmin(snap.exists() && snap.get("enabled") !== false),
+        () => setIsAdmin(false)
+      );
+    });
+
+    return () => {
+      unsubAuth();
+      if (unsubAdmin) unsubAdmin();
+    };
+  }, []);
+
+  return isAdmin;
+}
+
 
 async function call(action: string, payload: any = {}) {
   const u = auth.currentUser;
