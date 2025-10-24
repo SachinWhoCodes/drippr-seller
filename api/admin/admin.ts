@@ -91,11 +91,11 @@ export default async function handler(req: any, res: any) {
       }
 
       // -------------------- PRODUCT QUEUE --------------------
-      // We assume sellers write docs in `productQueue` at create-time (see patch for create.ts below).
+      // We assume sellers write docs in `merchantProducts` at create-time (see patch for create.ts below).
       case "queue.list": {
         const status = String((req.query.status ?? body.status ?? "pending") as string);
         const limit = Number(req.query.limit ?? body.limit ?? 200);
-        let ref = adminDb.collection("productQueue") as FirebaseFirestore.Query;
+        let ref = adminDb.collection("merchantProducts") as FirebaseFirestore.Query;
 
         if (status && status !== "all") ref = ref.where("status", "==", status);
         // order by createdAt desc when available
@@ -128,7 +128,7 @@ export default async function handler(req: any, res: any) {
         const { id, note } = body as { id: string; note?: string };
         if (!id) return res.status(400).json({ ok: false, error: "id required" });
 
-        const ref = adminDb.collection("productQueue").doc(id);
+        const ref = adminDb.collection("merchantProducts").doc(id);
         const snap = await ref.get();
         if (!snap.exists) return res.status(404).json({ ok: false, error: "queue item not found" });
 
@@ -160,7 +160,7 @@ export default async function handler(req: any, res: any) {
         const { id, reason } = body as { id: string; reason?: string };
         if (!id) return res.status(400).json({ ok: false, error: "id required" });
 
-        const ref = adminDb.collection("productQueue").doc(id);
+        const ref = adminDb.collection("merchantProducts").doc(id);
         const snap = await ref.get();
         if (!snap.exists) return res.status(404).json({ ok: false, error: "queue item not found" });
 
