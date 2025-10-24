@@ -21,14 +21,13 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
 import { Search, Eye, CheckCircle, XCircle, RefreshCcw } from "lucide-react";
 
-import { auth } from "@/lib/firebase";
+import { queueList, queueApprove, queueReject } from "@/lib/adminApi";
 
-// ------------ Types ------------
+// ------------ Types (mirror backend) ------------
 type VariantDraft = {
   options?: { name: string; values: string[] }[];
-  // each variant is a combo of optionValues in same order as options
   variants?: Array<{
-    optionValues: string[]; // e.g. ["Red","M"]
+    optionValues: string[];
     price?: number | string;
     compareAtPrice?: number | string;
     sku?: string;
@@ -39,56 +38,40 @@ type VariantDraft = {
 };
 
 type QueueProduct = {
-  id: string;                 // Firestore doc id
+  id: string;
   merchantId: string;
   title: string;
   description?: string;
   price?: number;
   productType?: string | null;
-  status: "in_review" | "draft" | "active" | "rejected";
+  status: "pending" | "approved" | "rejected"; // queue statuses
   tags?: string[];
   images?: string[];
   image?: string | null;
   createdAt?: number;
-  // enrichment from backend
-  merchant?: {
-    uid: string;
-    name?: string;
-    email?: string;
-  };
-  variantDraft?: VariantDraft | null;
+  merchant?: { uid?: string; name?: string; email?: string } | null;
+  variantDraft?: VariantDraft | null; // seller-provided, optional
   adminNotes?: string;
 };
 
-type ListResp = { ok: true; items: QueueProduct[] } | { ok: false; error: string };
-type OkResp = { ok: true } | { ok: false; error: string };
-
-// ------------ Small helpers ------------
 const PLACEHOLDER = "https://placehold.co/96x96?text=IMG";
 
-async function getIdToken(): Promise<string> {
-  const u = auth.currentUser;
-  if (!u) throw new Error("Please sign in as an admin.");
-  return u.getIdToken();
-}
-
+// ------------ Small helpers ------------
 function formatMoneyINR(n?: number | string) {
   const v = Number(n ?? 0);
   return `₹${v.toLocaleString("en-IN")}`;
 }
 
 function StatusBadge({ s }: { s: QueueProduct["status"] }) {
-  const variants: Record<string, string> = {
-    in_review: "default",
-    draft: "secondary",
-    active: "outline",
-    rejected: "destructive",
-  };
-  return (
-    <Badge variant={(variants[s] as any) ?? "default"} className="capitalize">
-      {s.replace("_", " ")}
-    </Badge>
-  );
+  const label =
+    s === "pending" ? "In review" : s === "approved" ? "Approved" : "Rejected";
+  const cls =
+    s === "pending"
+      ? "bg-warning/10 text-warning border-warning/20"
+      : s === "approved"
+      ? "bg-success/10 text-success border-success/20"
+      : "bg-destructive/10 text-destructive border-destructive/20";
+  return <Badge className={cls}>{label}</Badge>;
 }
 
 // Compact table to preview seller-provided variant draft
@@ -155,16 +138,16 @@ function VariantDraftPreview({ variantDraft }: { variantDraft?: VariantDraft | n
 }
 
 // ------------ Page ------------
-type StatusFilter = "in_review" | "draft" | "all";
+type StatusFilter = "pending" | "approved" | "rejected" | "all";
 
 export default function ProductQueue() {
   const [items, setItems] = useState<QueueProduct[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionBusy, setActionBusy] = useState(false);
 
-  const [status, setStatus] = useState<StatusFilter>("in_review");
+  const [status, setStatus] = useState<StatusFilter>("pending");
   const [search, setSearch] = useState("");
-  const [q, setQ] = useState(""); // debounced search value
+  const [q, setQ] = useState("");
   const timer = useRef<number | null>(null);
 
   const [selected, setSelected] = useState<QueueProduct | null>(null);
@@ -174,7 +157,7 @@ export default function ProductQueue() {
   // Debounce search input
   useEffect(() => {
     if (timer.current) window.clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => setQ(search.trim()), 300);
+    timer.current = window.setTimeout(() => setQ(search.trim().toLowerCase()), 300);
     return () => {
       if (timer.current) window.clearTimeout(timer.current);
     };
@@ -183,16 +166,17 @@ export default function ProductQueue() {
   const fetchQueue = useCallback(async () => {
     setLoading(true);
     try {
-      const token = await getIdToken();
-      const url = new URL("/api/admin/queue/list", window.location.origin);
-      if (status !== "all") url.searchParams.set("status", status);
-      if (q) url.searchParams.set("q", q);
-      const r = await fetch(url.toString(), {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const j: ListResp = await r.json();
-      if (!r.ok || !j.ok) throw new Error(("error" in j && j.error) || "Failed to load queue");
-      setItems(j.items);
+      const resp = await queueList({ status: status === "all" ? undefined : status, limit: 300 });
+      const base = (resp.items || []) as QueueProduct[];
+      // client-side text filter (title, merchant name/email)
+      const filtered = q
+        ? base.filter((p) => {
+            const hay =
+              `${p.title || ""} ${p.merchant?.name || ""} ${p.merchant?.email || ""}`.toLowerCase();
+            return hay.includes(q);
+          })
+        : base;
+      setItems(filtered);
     } catch (e: any) {
       toast.error(e?.message || "Failed to load queue");
     } finally {
@@ -207,18 +191,8 @@ export default function ProductQueue() {
   const approve = async (product: QueueProduct) => {
     try {
       setActionBusy(true);
-      const token = await getIdToken();
-      const r = await fetch("/api/admin/queue/approve", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ id: product.id }),
-      });
-      const j: OkResp = await r.json();
-      if (!r.ok || !j.ok) throw new Error(("error" in j && j.error) || "Approve failed");
-      toast.success(`${product.title} approved & published`);
+      await queueApprove(product.id);
+      toast.success(`${product.title} approved`);
       setSelected(null);
       fetchQueue();
     } catch (e: any) {
@@ -233,17 +207,7 @@ export default function ProductQueue() {
     if (!rejectReason.trim()) return toast.error("Please add a reason");
     try {
       setActionBusy(true);
-      const token = await getIdToken();
-      const r = await fetch("/api/admin/queue/reject", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ id: selected.id, reason: rejectReason.trim() }),
-      });
-      const j: OkResp = await r.json();
-      if (!r.ok || !j.ok) throw new Error(("error" in j && j.error) || "Reject failed");
+      await queueReject(selected.id, rejectReason.trim());
       toast.success(`${selected.title} rejected`);
       setRejectOpen(false);
       setRejectReason("");
@@ -264,8 +228,9 @@ export default function ProductQueue() {
             <SelectValue placeholder="Status" />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="in_review">In Review</SelectItem>
-            <SelectItem value="draft">Draft</SelectItem>
+            <SelectItem value="pending">In Review</SelectItem>
+            <SelectItem value="approved">Approved</SelectItem>
+            <SelectItem value="rejected">Rejected</SelectItem>
             <SelectItem value="all">All Status</SelectItem>
           </SelectContent>
         </Select>
@@ -289,6 +254,7 @@ export default function ProductQueue() {
   }, [status, search, loading, fetchQueue]);
 
   return (
+    <DashboardLayout>
       <div className="space-y-4">
         {/* Filters */}
         <Card>
@@ -440,7 +406,7 @@ export default function ProductQueue() {
                       onClick={() => approve(selected)}
                     >
                       <CheckCircle className="mr-2 h-4 w-4" />
-                      Approve & Publish
+                      Approve
                     </Button>
                     <Button
                       variant="destructive"
@@ -495,5 +461,6 @@ export default function ProductQueue() {
           </DialogContent>
         </Dialog>
       </div>
+    </DashboardLayout>
   );
 }
