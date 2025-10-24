@@ -23,7 +23,7 @@ import { Search, Eye, CheckCircle, XCircle, RefreshCcw } from "lucide-react";
 
 import { queueList, queueApprove, queueReject } from "@/lib/adminApi";
 
-// ------------ Types (mirror backend) ------------
+// ---------- Types (mirror backend response) ----------
 type VariantDraft = {
   options?: { name: string; values: string[] }[];
   variants?: Array<{
@@ -44,27 +44,24 @@ type QueueProduct = {
   description?: string;
   price?: number;
   productType?: string | null;
-  status: "pending" | "approved" | "rejected"; // queue statuses
+  status: "pending" | "approved" | "rejected";
   tags?: string[];
   images?: string[];
   image?: string | null;
   createdAt?: number;
   merchant?: { uid?: string; name?: string; email?: string } | null;
-  variantDraft?: VariantDraft | null; // seller-provided, optional
+  variantDraft?: VariantDraft | null;
   adminNotes?: string;
 };
 
 const PLACEHOLDER = "https://placehold.co/96x96?text=IMG";
 
-// ------------ Small helpers ------------
-function formatMoneyINR(n?: number | string) {
-  const v = Number(n ?? 0);
-  return `₹${v.toLocaleString("en-IN")}`;
-}
+// ---------- helpers ----------
+const formatMoneyINR = (n?: number | string) =>
+  `₹${Number(n ?? 0).toLocaleString("en-IN")}`;
 
 function StatusBadge({ s }: { s: QueueProduct["status"] }) {
-  const label =
-    s === "pending" ? "In review" : s === "approved" ? "Approved" : "Rejected";
+  const label = s === "pending" ? "In review" : s === "approved" ? "Approved" : "Rejected";
   const cls =
     s === "pending"
       ? "bg-warning/10 text-warning border-warning/20"
@@ -74,12 +71,10 @@ function StatusBadge({ s }: { s: QueueProduct["status"] }) {
   return <Badge className={cls}>{label}</Badge>;
 }
 
-// Compact table to preview seller-provided variant draft
 function VariantDraftPreview({ variantDraft }: { variantDraft?: VariantDraft | null }) {
   if (!variantDraft || (!variantDraft.options?.length && !variantDraft.variants?.length)) {
     return <div className="text-sm text-muted-foreground">No variant draft provided.</div>;
   }
-
   return (
     <div className="space-y-3">
       {variantDraft.options?.length ? (
@@ -115,13 +110,9 @@ function VariantDraftPreview({ variantDraft }: { variantDraft?: VariantDraft | n
               <TableBody>
                 {variantDraft.variants.map((v, idx) => (
                   <TableRow key={idx}>
-                    <TableCell className="font-medium">
-                      {(v.optionValues || []).join(" / ")}
-                    </TableCell>
+                    <TableCell className="font-medium">{(v.optionValues || []).join(" / ")}</TableCell>
                     <TableCell>{v.price != null ? formatMoneyINR(v.price) : "—"}</TableCell>
-                    <TableCell>
-                      {v.compareAtPrice != null ? formatMoneyINR(v.compareAtPrice) : "—"}
-                    </TableCell>
+                    <TableCell>{v.compareAtPrice != null ? formatMoneyINR(v.compareAtPrice) : "—"}</TableCell>
                     <TableCell className="text-xs">{v.sku || "—"}</TableCell>
                     <TableCell className="text-xs">{v.barcode || "—"}</TableCell>
                     <TableCell>{v.weightGrams ?? "—"}</TableCell>
@@ -137,7 +128,7 @@ function VariantDraftPreview({ variantDraft }: { variantDraft?: VariantDraft | n
   );
 }
 
-// ------------ Page ------------
+// ---------- Page ----------
 type StatusFilter = "pending" | "approved" | "rejected" | "all";
 
 export default function ProductQueue() {
@@ -148,33 +139,33 @@ export default function ProductQueue() {
   const [status, setStatus] = useState<StatusFilter>("pending");
   const [search, setSearch] = useState("");
   const [q, setQ] = useState("");
-  const timer = useRef<number | null>(null);
+  const debounce = useRef<number | null>(null);
 
   const [selected, setSelected] = useState<QueueProduct | null>(null);
   const [rejectOpen, setRejectOpen] = useState(false);
   const [rejectReason, setRejectReason] = useState("");
 
-  // Debounce search input
+  // debounce search
   useEffect(() => {
-    if (timer.current) window.clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => setQ(search.trim().toLowerCase()), 300);
-    return () => {
-      if (timer.current) window.clearTimeout(timer.current);
-    };
+    if (debounce.current) window.clearTimeout(debounce.current);
+    debounce.current = window.setTimeout(() => setQ(search.trim().toLowerCase()), 300);
+    return () => debounce.current && window.clearTimeout(debounce.current);
   }, [search]);
 
   const fetchQueue = useCallback(async () => {
     setLoading(true);
     try {
-      const resp = await queueList({ status: status === "all" ? undefined : status, limit: 300 });
+      const resp = await queueList({
+        status: status === "all" ? undefined : status,
+        limit: 300,
+      });
       const base = (resp.items || []) as QueueProduct[];
-      // client-side text filter (title, merchant name/email)
       const filtered = q
-        ? base.filter((p) => {
-            const hay =
-              `${p.title || ""} ${p.merchant?.name || ""} ${p.merchant?.email || ""}`.toLowerCase();
-            return hay.includes(q);
-          })
+        ? base.filter((p) =>
+            `${p.title || ""} ${p.merchant?.name || ""} ${p.merchant?.email || ""}`
+              .toLowerCase()
+              .includes(q)
+          )
         : base;
       setItems(filtered);
     } catch (e: any) {
@@ -191,7 +182,7 @@ export default function ProductQueue() {
   const approve = async (product: QueueProduct) => {
     try {
       setActionBusy(true);
-      await queueApprove(product.id);
+      await queueApprove(product.id); // backend publishes / marks approved
       toast.success(`${product.title} approved`);
       setSelected(null);
       fetchQueue();
@@ -220,8 +211,8 @@ export default function ProductQueue() {
     }
   };
 
-  const header = useMemo(() => {
-    return (
+  const header = useMemo(
+    () => (
       <div className="flex flex-col md:flex-row gap-4">
         <Select value={status} onValueChange={(v) => setStatus(v as StatusFilter)}>
           <SelectTrigger className="w-full md:w-48">
@@ -250,28 +241,28 @@ export default function ProductQueue() {
           Refresh
         </Button>
       </div>
-    );
-  }, [status, search, loading, fetchQueue]);
+    ),
+    [status, search, loading, fetchQueue]
+  );
 
   return (
-    <DashboardLayout>
       <div className="space-y-4">
-        {/* Filters */}
         <Card>
           <CardContent className="pt-6">{header}</CardContent>
         </Card>
 
-        {/* Table */}
         <Card>
           <CardContent className="pt-6">
             {loading ? (
               <div className="space-y-2">
-                {[1, 2, 3, 4, 5].map((i) => (
+                {Array.from({ length: 5 }).map((_, i) => (
                   <Skeleton key={i} className="h-16 w-full" />
                 ))}
               </div>
             ) : items.length === 0 ? (
-              <div className="text-center text-muted-foreground py-12">No products found.</div>
+              <div className="text-center text-muted-foreground py-12">
+                No products found.
+              </div>
             ) : (
               <Table>
                 <TableHeader>
@@ -292,9 +283,7 @@ export default function ProductQueue() {
                           src={p.image || p.images?.[0] || PLACEHOLDER}
                           alt={p.title}
                           className="w-12 h-12 object-cover rounded border bg-muted"
-                          onError={(e) =>
-                            ((e.currentTarget as HTMLImageElement).src = PLACEHOLDER)
-                          }
+                          onError={(e) => ((e.currentTarget as HTMLImageElement).src = PLACEHOLDER)}
                         />
                       </TableCell>
                       <TableCell className="font-medium">{p.title}</TableCell>
@@ -342,7 +331,6 @@ export default function ProductQueue() {
                 </SheetHeader>
 
                 <div className="mt-6 space-y-6">
-                  {/* Images */}
                   {selected.images?.length ? (
                     <div>
                       <h4 className="font-semibold mb-2">Product Images</h4>
@@ -362,7 +350,6 @@ export default function ProductQueue() {
                     </div>
                   ) : null}
 
-                  {/* Details */}
                   <div className="space-y-2 text-sm">
                     <div>
                       <span className="font-semibold">Merchant:</span>{" "}
@@ -395,16 +382,10 @@ export default function ProductQueue() {
                     </div>
                   </div>
 
-                  {/* Variant Draft */}
                   <VariantDraftPreview variantDraft={selected.variantDraft} />
 
-                  {/* Actions */}
                   <div className="flex gap-2 pt-4">
-                    <Button
-                      className="flex-1"
-                      disabled={actionBusy}
-                      onClick={() => approve(selected)}
-                    >
+                    <Button className="flex-1" disabled={actionBusy} onClick={() => approve(selected)}>
                       <CheckCircle className="mr-2 h-4 w-4" />
                       Approve
                     </Button>
@@ -450,17 +431,12 @@ export default function ProductQueue() {
               >
                 Cancel
               </Button>
-              <Button
-                variant="destructive"
-                onClick={reject}
-                disabled={actionBusy || !rejectReason.trim()}
-              >
+              <Button variant="destructive" onClick={reject} disabled={actionBusy || !rejectReason.trim()}>
                 Reject Product
               </Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>
       </div>
-    </DashboardLayout>
   );
 }
