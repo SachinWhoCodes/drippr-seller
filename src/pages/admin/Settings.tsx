@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { getLocalPublicationId, setLocalPublicationId } from "@/lib/adminApi";
+import { getPublicationId, setPublicationId } from "@/lib/adminApi";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -8,15 +8,17 @@ import { toast } from "sonner";
 import { Save } from "lucide-react";
 
 export default function AdminSettings() {
-  const [publicationId, setPublicationId] = useState("");
+  const [publicationId, setPublicationIdState] = useState("");
 
   useEffect(() => {
-    const id = getLocalPublicationId();
-    if (id) setPublicationId(id);
+    (async () => {
+      const id = await getPublicationId();
+      if (id) setPublicationIdState(id);
+    })();
   }, []);
 
-  const handleSave = () => {
-    setLocalPublicationId(publicationId);
+  const handleSave = async () => {
+    await setPublicationId(publicationId);
     toast.success("Settings saved successfully!");
   };
 
@@ -36,7 +38,7 @@ export default function AdminSettings() {
               id="publicationId"
               placeholder="Enter publication ID..."
               value={publicationId}
-              onChange={(e) => setPublicationId(e.target.value)}
+              onChange={(e) => setPublicationIdState(e.target.value)}
             />
             <p className="text-xs text-muted-foreground">
               This ID is used to identify the publication channel for approved products.

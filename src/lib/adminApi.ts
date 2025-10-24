@@ -1,8 +1,9 @@
 // --- Admin check hook (Firestore-based) ---
 import { useEffect, useState } from "react";
 import { onAuthStateChanged } from "firebase/auth";
-import { doc, onSnapshot } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
+import { doc, getDoc, setDoc, serverTimestamp, onSnapshot } from "firebase/firestore";
+
 
 /**
  * Returns true if the current user has an enabled admin record at:
@@ -43,24 +44,55 @@ export function useIsAdmin(): boolean {
 }
 
 
-// --- Publication (Sales Channel) helpers ---
+let _publicationIdCache: string | null | undefined; // undefined => not fetched yet
 
 /**
- * Returns the Shopify Publication (sales channel) GraphQL ID to use when
- * publishing products, or null if not configured.
- *
- * Set this in your env as VITE_SHOPIFY_PUBLICATION_ID, e.g.:
- * gid://shopify/Publication/1234567890
+ * One-time fetch of the Shopify Publication (sales channel) GraphQL ID
+ * from Firestore: adminSettings/shopify.publicationId
  */
-export function getLocalPublicationId(): string | null {
-  // Vite-style env vars:
-  const id =
-    (import.meta as any)?.env?.VITE_SHOPIFY_PUBLICATION_ID ??
-    (import.meta as any)?.env?.VITE_PUBLICATION_ID ??
-    "";
+export async function getPublicationId(): Promise<string | null> {
+  if (_publicationIdCache !== undefined) return _publicationIdCache ?? null;
 
-  const trimmed = String(id || "").trim();
-  return trimmed ? trimmed : null;
+  const ref = doc(db, "adminSettings", "shopify");
+  const snap = await getDoc(ref);
+  const val = (snap.exists() ? (snap.data().publicationId as string | null | undefined) : null) ?? null;
+
+  _publicationIdCache = val;
+  return val;
+}
+
+/**
+ * Realtime listener (optional) if your UI should update live.
+ * Returns unsubscribe() like any Firestore onSnapshot.
+ */
+export function watchPublicationId(cb: (id: string | null) => void) {
+  const ref = doc(db, "adminSettings", "shopify");
+  return onSnapshot(ref, (snap) => {
+    const val = (snap.exists() ? (snap.data().publicationId as string | null | undefined) : null) ?? null;
+    _publicationIdCache = val;
+    cb(val);
+  });
+}
+
+/**
+ * Write the Publication ID (admins only).
+ * Saves admin uid + timestamp for audit.
+ */
+export async function setPublicationId(id: string | null): Promise<void> {
+  const uid = auth.currentUser?.uid ?? null;
+  const ref = doc(db, "adminSettings", "shopify");
+
+  await setDoc(
+    ref,
+    {
+      publicationId: (id ?? "").trim() || null,
+      updatedAt: serverTimestamp(),
+      updatedBy: uid,
+    },
+    { merge: true }
+  );
+
+  _publicationIdCache = (id ?? "").trim() || null;
 }
 
 
