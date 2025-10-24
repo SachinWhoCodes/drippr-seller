@@ -34,6 +34,16 @@ async function requireAdmin(req: any, res: any) {
 
 export default async function handler(req: any, res: any) {
   try {
+
+    // --- ADD THIS BLOCK ---
+    if (req.method === "OPTIONS") {
+      res.setHeader("Allow", "GET, POST, OPTIONS");
+      res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+      return res.status(200).end();
+    }
+    // --- END OF BLOCK ---
+
     if (!requireMethod(req, res, ["GET", "POST"])) return;
 
     // Parse input
