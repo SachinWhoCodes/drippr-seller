@@ -32,7 +32,7 @@ type MerchantProduct = {
   title: string;
   price?: number;
   productType?: string;
-  status?: "active" | "draft" | "in_review";
+  status?: "pending" | "approved" | "rejected";
   images?: string[];
   image?: string;
   createdAt?: number;
@@ -789,13 +789,13 @@ export default function Products() {
                   {filtered.map((p) => {
                     const img = p.image || (p.images?.[0] ?? "");
                     const statusClass =
-                      p.status === "active"
+                      p.status === "approved"
                         ? "bg-success/10 text-success border-success/20"
-                        : p.status === "in_review"
+                        : p.status === "pending"
                         ? "bg-warning/10 text-warning border-warning/20"
                         : "bg-muted text-muted-foreground border-muted";
                     const statusText =
-                      p.status === "active" ? "Active" : p.status === "in_review" ? "In review" : "Draft";
+                      p.status === "approved" ? "Active" : p.status === "pending" ? "In review" : "Rejected";
                     return (
                       <TableRow key={p.id}>
                         <TableCell>
