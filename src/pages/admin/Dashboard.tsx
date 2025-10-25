@@ -71,7 +71,7 @@ export default function AdminDashboard() {
     {
       const qRef = query(
         collection(db, "merchantProducts"),
-        where("status", "==", "in_review")
+        where("status", "==", "pending")
       );
       subs.push(
         onSnapshot(qRef, (snap) => setProductsInReview(snap.size))

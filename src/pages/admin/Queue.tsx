@@ -27,7 +27,7 @@ import { queueList, queueApprove, queueReject } from "@/lib/adminApi";
 type VariantDraft = {
   options?: { name: string; values: string[] }[];
   variants?: Array<{
-    optionValues: string[];
+    title: string;
     price?: number | string;
     compareAtPrice?: number | string;
     sku?: string;
@@ -110,7 +110,7 @@ function VariantDraftPreview({ variantDraft }: { variantDraft?: VariantDraft | n
               <TableBody>
                 {variantDraft.variants.map((v, idx) => (
                   <TableRow key={idx}>
-                    <TableCell className="font-medium">{(v.optionValues || []).join(" / ")}</TableCell>
+                    <TableCell className="font-medium">{v.title || "—"}</TableCell>
                     <TableCell>{v.price != null ? formatMoneyINR(v.price) : "—"}</TableCell>
                     <TableCell>{v.compareAtPrice != null ? formatMoneyINR(v.compareAtPrice) : "—"}</TableCell>
                     <TableCell className="text-xs">{v.sku || "—"}</TableCell>
