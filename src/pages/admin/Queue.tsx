@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import DashboardLayout from "@/components/DashboardLayout";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -19,15 +18,28 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
-import { Search, Eye, CheckCircle, XCircle, RefreshCcw } from "lucide-react";
+import { Search, Eye, CheckCircle, XCircle, RefreshCcw, Info } from "lucide-react";
 
 import { queueList, queueApprove, queueReject } from "@/lib/adminApi";
 
-// ---------- Types (mirror backend response) ----------
+// ---------- Types (mirrors backend; tolerant to missing fields) ----------
+type ChangeVal = { old?: any; new?: any };
+
+type ChangeSummary = {
+  instantApplied?: string[]; // e.g. ["price","stock"]
+  base?: Record<string, ChangeVal>; // title/description/productType/price/stock/etc.
+  variants?: Array<{
+    key?: string;         // internal key (e.g., "Red|M")
+    title?: string;       // human-friendly label (e.g., "Red / M")
+    fields?: Record<string, ChangeVal>; // price/compareAtPrice/sku/inventoryQty/barcode/weightGrams
+  }>;
+  note?: string;
+};
+
 type VariantDraft = {
   options?: { name: string; values: string[] }[];
   variants?: Array<{
-    title: string;
+    title?: string;
     price?: number | string;
     compareAtPrice?: number | string;
     sku?: string;
@@ -37,6 +49,8 @@ type VariantDraft = {
   }>;
 };
 
+type QueueStatus = "pending" | "approved" | "rejected" | "update_in_review";
+
 type QueueProduct = {
   id: string;
   merchantId: string;
@@ -44,13 +58,14 @@ type QueueProduct = {
   description?: string;
   price?: number;
   productType?: string | null;
-  status: "pending" | "approved" | "rejected";
+  status: QueueStatus;
   tags?: string[];
   images?: string[];
   image?: string | null;
   createdAt?: number;
   merchant?: { uid?: string; name?: string; email?: string } | null;
   variantDraft?: VariantDraft | null;
+  changeSummary?: ChangeSummary | null; // present for updates
   adminNotes?: string;
 };
 
@@ -61,13 +76,21 @@ const formatMoneyINR = (n?: number | string) =>
   `₹${Number(n ?? 0).toLocaleString("en-IN")}`;
 
 function StatusBadge({ s }: { s: QueueProduct["status"] }) {
-  const label = s === "pending" ? "In review" : s === "approved" ? "Approved" : "Rejected";
-  const cls =
-    s === "pending"
-      ? "bg-warning/10 text-warning border-warning/20"
-      : s === "approved"
-      ? "bg-success/10 text-success border-success/20"
-      : "bg-destructive/10 text-destructive border-destructive/20";
+  let label = "In review";
+  let cls =
+    "bg-warning/10 text-warning border-warning/20";
+
+  if (s === "approved") {
+    label = "Approved";
+    cls = "bg-success/10 text-success border-success/20";
+  } else if (s === "rejected") {
+    label = "Rejected";
+    cls = "bg-destructive/10 text-destructive border-destructive/20";
+  } else if (s === "update_in_review") {
+    label = "Update review";
+    cls = "bg-primary/10 text-primary border-primary/20";
+  }
+
   return <Badge className={cls}>{label}</Badge>;
 }
 
@@ -128,8 +151,73 @@ function VariantDraftPreview({ variantDraft }: { variantDraft?: VariantDraft | n
   );
 }
 
+function ChangesTable({ base }: { base?: Record<string, ChangeVal> }) {
+  if (!base || !Object.keys(base).length) return null;
+  return (
+    <div>
+      <h4 className="font-semibold mb-2">Base field changes</h4>
+      <div className="overflow-x-auto rounded border">
+        <table className="w-full text-sm">
+          <thead className="bg-muted/50">
+            <tr>
+              <th className="text-left p-2 w-40">Field</th>
+              <th className="text-left p-2">Old</th>
+              <th className="text-left p-2">New</th>
+            </tr>
+          </thead>
+          <tbody>
+            {Object.entries(base).map(([k, v]) => (
+              <tr key={k} className="border-t">
+                <td className="p-2 font-medium capitalize">{k.replace(/_/g, " ")}</td>
+                <td className="p-2 text-muted-foreground">{String(v.old ?? "—")}</td>
+                <td className="p-2">{String(v.new ?? "—")}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function VariantChanges({ variants }: { variants?: Array<{ key?: string; title?: string; fields?: Record<string, ChangeVal> }> }) {
+  if (!variants || !variants.length) return null;
+  return (
+    <div className="space-y-3">
+      <h4 className="font-semibold">Variant changes</h4>
+      <div className="space-y-2">
+        {variants.map((v, i) => (
+          <div key={v.key || v.title || i} className="rounded border p-3">
+            <div className="font-medium mb-2">{v.title || v.key || `Variant ${i + 1}`}</div>
+            <div className="overflow-x-auto rounded border">
+              <table className="w-full text-sm">
+                <thead className="bg-muted/50">
+                  <tr>
+                    <th className="text-left p-2 w-40">Field</th>
+                    <th className="text-left p-2">Old</th>
+                    <th className="text-left p-2">New</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.entries(v.fields || {}).map(([fk, fv]) => (
+                    <tr key={fk} className="border-t">
+                      <td className="p-2 font-medium capitalize">{fk.replace(/_/g, " ")}</td>
+                      <td className="p-2 text-muted-foreground">{String(fv.old ?? "—")}</td>
+                      <td className="p-2">{String(fv.new ?? "—")}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ---------- Page ----------
-type StatusFilter = "pending" | "approved" | "rejected" | "all";
+type StatusFilter = QueueStatus | "all";
 
 export default function ProductQueue() {
   const [items, setItems] = useState<QueueProduct[]>([]);
@@ -182,8 +270,12 @@ export default function ProductQueue() {
   const approve = async (product: QueueProduct) => {
     try {
       setActionBusy(true);
-      await queueApprove(product.id); // backend publishes / marks approved
-      toast.success(`${product.title} approved`);
+      await queueApprove(product.id); // backend handles both new + update approvals
+      toast.success(
+        product.status === "update_in_review"
+          ? `${product.title} update approved`
+          : `${product.title} approved`
+      );
       setSelected(null);
       fetchQueue();
     } catch (e: any) {
@@ -199,7 +291,11 @@ export default function ProductQueue() {
     try {
       setActionBusy(true);
       await queueReject(selected.id, rejectReason.trim());
-      toast.success(`${selected.title} rejected`);
+      toast.success(
+        selected.status === "update_in_review"
+          ? `${selected.title} update rejected`
+          : `${selected.title} rejected`
+      );
       setRejectOpen(false);
       setRejectReason("");
       setSelected(null);
@@ -215,11 +311,12 @@ export default function ProductQueue() {
     () => (
       <div className="flex flex-col md:flex-row gap-4">
         <Select value={status} onValueChange={(v) => setStatus(v as StatusFilter)}>
-          <SelectTrigger className="w-full md:w-48">
+          <SelectTrigger className="w-full md:w-56">
             <SelectValue placeholder="Status" />
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="pending">In Review</SelectItem>
+            <SelectItem value="update_in_review">Updates</SelectItem>
             <SelectItem value="approved">Approved</SelectItem>
             <SelectItem value="rejected">Rejected</SelectItem>
             <SelectItem value="all">All Status</SelectItem>
@@ -246,197 +343,244 @@ export default function ProductQueue() {
   );
 
   return (
-      <div className="space-y-4">
-        <Card>
-          <CardContent className="pt-6">{header}</CardContent>
-        </Card>
+    <div className="space-y-4">
+      <Card>
+        <CardContent className="pt-6">{header}</CardContent>
+      </Card>
 
-        <Card>
-          <CardContent className="pt-6">
-            {loading ? (
-              <div className="space-y-2">
-                {Array.from({ length: 5 }).map((_, i) => (
-                  <Skeleton key={i} className="h-16 w-full" />
-                ))}
-              </div>
-            ) : items.length === 0 ? (
-              <div className="text-center text-muted-foreground py-12">
-                No products found.
-              </div>
-            ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Image</TableHead>
-                    <TableHead>Title</TableHead>
-                    <TableHead>Merchant</TableHead>
-                    <TableHead>Created</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Actions</TableHead>
+      <Card>
+        <CardContent className="pt-6">
+          {loading ? (
+            <div className="space-y-2">
+              {Array.from({ length: 5 }).map((_, i) => (
+                <Skeleton key={i} className="h-16 w-full" />
+              ))}
+            </div>
+          ) : items.length === 0 ? (
+            <div className="text-center text-muted-foreground py-12">
+              No products found.
+            </div>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Image</TableHead>
+                  <TableHead>Title</TableHead>
+                  <TableHead>Merchant</TableHead>
+                  <TableHead>Created</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {items.map((p) => (
+                  <TableRow key={p.id}>
+                    <TableCell>
+                      <img
+                        src={p.image || p.images?.[0] || PLACEHOLDER}
+                        alt={p.title}
+                        className="w-12 h-12 object-cover rounded border bg-muted"
+                        onError={(e) => ((e.currentTarget as HTMLImageElement).src = PLACEHOLDER)}
+                      />
+                    </TableCell>
+                    <TableCell className="font-medium">
+                      {p.title}
+                      {p.status === "update_in_review" ? (
+                        <span className="ml-2 text-xs rounded px-2 py-0.5 border bg-primary/5 text-primary">
+                          Update
+                        </span>
+                      ) : null}
+                    </TableCell>
+                    <TableCell>
+                      {p.merchant?.name || "-"}
+                      {p.merchant?.email ? (
+                        <span className="block text-xs text-muted-foreground">
+                          {p.merchant.email}
+                        </span>
+                      ) : null}
+                    </TableCell>
+                    <TableCell>
+                      {p.createdAt ? new Date(p.createdAt).toLocaleDateString() : "-"}
+                    </TableCell>
+                    <TableCell>
+                      <StatusBadge s={p.status} />
+                    </TableCell>
+                    <TableCell>
+                      <Button size="sm" variant="outline" onClick={() => setSelected(p)}>
+                        <Eye className="h-4 w-4 mr-1" />
+                        Review
+                      </Button>
+                    </TableCell>
                   </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {items.map((p) => (
-                    <TableRow key={p.id}>
-                      <TableCell>
-                        <img
-                          src={p.image || p.images?.[0] || PLACEHOLDER}
-                          alt={p.title}
-                          className="w-12 h-12 object-cover rounded border bg-muted"
-                          onError={(e) => ((e.currentTarget as HTMLImageElement).src = PLACEHOLDER)}
-                        />
-                      </TableCell>
-                      <TableCell className="font-medium">{p.title}</TableCell>
-                      <TableCell>
-                        {p.merchant?.name || "-"}
-                        {p.merchant?.email ? (
-                          <span className="block text-xs text-muted-foreground">
-                            {p.merchant.email}
-                          </span>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Review Sheet */}
+      <Sheet open={!!selected} onOpenChange={() => setSelected(null)}>
+        <SheetContent className="overflow-y-auto w-full sm:max-w-2xl">
+          {selected && (
+            <>
+              <SheetHeader>
+                <SheetTitle className="flex items-center justify-between">
+                  <span>{selected.title}</span>
+                  <StatusBadge s={selected.status} />
+                </SheetTitle>
+                <SheetDescription>
+                  Review product details, images, variant draft (if any), and the change summary for updates.
+                </SheetDescription>
+              </SheetHeader>
+
+              <div className="mt-6 space-y-6">
+                {/* Update callout */}
+                {selected.status === "update_in_review" && (
+                  <div className="rounded-md border bg-primary/5 p-3 text-sm">
+                    <div className="flex items-start gap-2">
+                      <Info className="h-4 w-4 mt-0.5 text-primary" />
+                      <div>
+                        <div className="font-medium text-primary">Update requested</div>
+                        <p className="text-muted-foreground">
+                          Price / stock edits (if present) were already applied to the live Shopify product. Other changes are pending approval below.
+                        </p>
+                        {selected.changeSummary?.instantApplied?.length ? (
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {selected.changeSummary.instantApplied.map((k) => (
+                              <Badge key={k} variant="outline" className="text-xs">{k}</Badge>
+                            ))}
+                          </div>
                         ) : null}
-                      </TableCell>
-                      <TableCell>
-                        {p.createdAt ? new Date(p.createdAt).toLocaleDateString() : "-"}
-                      </TableCell>
-                      <TableCell>
-                        <StatusBadge s={p.status} />
-                      </TableCell>
-                      <TableCell>
-                        <Button size="sm" variant="outline" onClick={() => setSelected(p)}>
-                          <Eye className="h-4 w-4 mr-1" />
-                          Review
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Review Sheet */}
-        <Sheet open={!!selected} onOpenChange={() => setSelected(null)}>
-          <SheetContent className="overflow-y-auto w-full sm:max-w-2xl">
-            {selected && (
-              <>
-                <SheetHeader>
-                  <SheetTitle className="flex items-center justify-between">
-                    <span>{selected.title}</span>
-                    <StatusBadge s={selected.status} />
-                  </SheetTitle>
-                  <SheetDescription>
-                    Review product details, images, and the seller-provided variant draft.
-                  </SheetDescription>
-                </SheetHeader>
-
-                <div className="mt-6 space-y-6">
-                  {selected.images?.length ? (
-                    <div>
-                      <h4 className="font-semibold mb-2">Product Images</h4>
-                      <div className="grid grid-cols-3 gap-2">
-                        {selected.images.map((img, idx) => (
-                          <img
-                            key={idx}
-                            src={img}
-                            alt={`${selected.title} ${idx + 1}`}
-                            className="w-full h-28 object-cover rounded border bg-muted"
-                            onError={(e) =>
-                              ((e.currentTarget as HTMLImageElement).src = PLACEHOLDER)
-                            }
-                          />
-                        ))}
+                        {selected.changeSummary?.note ? (
+                          <p className="text-xs text-muted-foreground mt-2">{selected.changeSummary.note}</p>
+                        ) : null}
                       </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Images */}
+                {selected.images?.length ? (
+                  <div>
+                    <h4 className="font-semibold mb-2">Product Images</h4>
+                    <div className="grid grid-cols-3 gap-2">
+                      {selected.images.map((img, idx) => (
+                        <img
+                          key={idx}
+                          src={img}
+                          alt={`${selected.title} ${idx + 1}`}
+                          className="w-full h-28 object-cover rounded border bg-muted"
+                          onError={(e) =>
+                            ((e.currentTarget as HTMLImageElement).src = PLACEHOLDER)
+                          }
+                        />
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                {/* Details */}
+                <div className="space-y-2 text-sm">
+                  <div>
+                    <span className="font-semibold">Merchant:</span>{" "}
+                    {selected.merchant?.name || "-"}{" "}
+                    {selected.merchant?.email ? `(${selected.merchant.email})` : ""}
+                  </div>
+                  <div>
+                    <span className="font-semibold">Base Price:</span>{" "}
+                    {selected.price != null ? formatMoneyINR(selected.price) : "—"}
+                  </div>
+                  <div>
+                    <span className="font-semibold">Type:</span>{" "}
+                    {selected.productType || "-"}
+                  </div>
+                  {selected.tags?.length ? (
+                    <div className="flex items-center gap-1 flex-wrap">
+                      <span className="font-semibold mr-1">Tags:</span>
+                      {selected.tags.map((tag, idx) => (
+                        <Badge key={idx} variant="secondary">
+                          {tag}
+                        </Badge>
+                      ))}
                     </div>
                   ) : null}
-
-                  <div className="space-y-2 text-sm">
-                    <div>
-                      <span className="font-semibold">Merchant:</span>{" "}
-                      {selected.merchant?.name || "-"}{" "}
-                      {selected.merchant?.email ? `(${selected.merchant.email})` : ""}
-                    </div>
-                    <div>
-                      <span className="font-semibold">Base Price:</span>{" "}
-                      {selected.price != null ? formatMoneyINR(selected.price) : "—"}
-                    </div>
-                    <div>
-                      <span className="font-semibold">Type:</span>{" "}
-                      {selected.productType || "-"}
-                    </div>
-                    {selected.tags?.length ? (
-                      <div className="flex items-center gap-1 flex-wrap">
-                        <span className="font-semibold mr-1">Tags:</span>
-                        {selected.tags.map((tag, idx) => (
-                          <Badge key={idx} variant="secondary">
-                            {tag}
-                          </Badge>
-                        ))}
-                      </div>
-                    ) : null}
-                    <div className="pt-2">
-                      <span className="font-semibold">Description:</span>
-                      <p className="text-muted-foreground whitespace-pre-wrap mt-1">
-                        {selected.description || "—"}
-                      </p>
-                    </div>
-                  </div>
-
-                  <VariantDraftPreview variantDraft={selected.variantDraft} />
-
-                  <div className="flex gap-2 pt-4">
-                    <Button className="flex-1" disabled={actionBusy} onClick={() => approve(selected)}>
-                      <CheckCircle className="mr-2 h-4 w-4" />
-                      Approve
-                    </Button>
-                    <Button
-                      variant="destructive"
-                      className="flex-1"
-                      disabled={actionBusy}
-                      onClick={() => setRejectOpen(true)}
-                    >
-                      <XCircle className="mr-2 h-4 w-4" />
-                      Reject
-                    </Button>
+                  <div className="pt-2">
+                    <span className="font-semibold">Description:</span>
+                    <p className="text-muted-foreground whitespace-pre-wrap mt-1">
+                      {selected.description || "—"}
+                    </p>
                   </div>
                 </div>
-              </>
-            )}
-          </SheetContent>
-        </Sheet>
 
-        {/* Reject dialog */}
-        <Dialog open={rejectOpen} onOpenChange={setRejectOpen}>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>Reject Product</DialogTitle>
-              <DialogDescription>
-                Provide a reason for rejection — the seller will see this in their panel.
-              </DialogDescription>
-            </DialogHeader>
-            <Textarea
-              placeholder="Reason for rejection…"
-              value={rejectReason}
-              onChange={(e) => setRejectReason(e.target.value)}
-              rows={4}
-            />
-            <DialogFooter>
-              <Button
-                variant="outline"
-                onClick={() => {
-                  setRejectOpen(false);
-                  setRejectReason("");
-                }}
-                disabled={actionBusy}
-              >
-                Cancel
-              </Button>
-              <Button variant="destructive" onClick={reject} disabled={actionBusy || !rejectReason.trim()}>
-                Reject Product
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
-      </div>
+                {/* Variant Draft (from seller) */}
+                <VariantDraftPreview variantDraft={selected.variantDraft} />
+
+                {/* Change Summary (for updates) */}
+                {selected.status === "update_in_review" && (
+                  <div className="space-y-4">
+                    <h3 className="font-semibold">Change Summary</h3>
+                    <ChangesTable base={selected.changeSummary?.base} />
+                    <VariantChanges variants={selected.changeSummary?.variants} />
+                  </div>
+                )}
+
+                {/* Actions */}
+                <div className="flex gap-2 pt-4">
+                  <Button className="flex-1" disabled={actionBusy} onClick={() => approve(selected)}>
+                    <CheckCircle className="mr-2 h-4 w-4" />
+                    {selected.status === "update_in_review" ? "Approve Update" : "Approve"}
+                  </Button>
+                  <Button
+                    variant="destructive"
+                    className="flex-1"
+                    disabled={actionBusy}
+                    onClick={() => setRejectOpen(true)}
+                  >
+                    <XCircle className="mr-2 h-4 w-4" />
+                    {selected.status === "update_in_review" ? "Reject Update" : "Reject"}
+                  </Button>
+                </div>
+              </div>
+            </>
+          )}
+        </SheetContent>
+      </Sheet>
+
+      {/* Reject dialog */}
+      <Dialog open={rejectOpen} onOpenChange={setRejectOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {selected?.status === "update_in_review" ? "Reject Update" : "Reject Product"}
+            </DialogTitle>
+            <DialogDescription>
+              Provide a reason — the seller will see this in their panel.
+            </DialogDescription>
+          </DialogHeader>
+          <Textarea
+            placeholder="Reason…"
+            value={rejectReason}
+            onChange={(e) => setRejectReason(e.target.value)}
+            rows={4}
+          />
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setRejectOpen(false);
+                setRejectReason("");
+              }}
+              disabled={actionBusy}
+            >
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={reject} disabled={actionBusy || !rejectReason.trim()}>
+              {selected?.status === "update_in_review" ? "Reject Update" : "Reject Product"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
   );
 }
