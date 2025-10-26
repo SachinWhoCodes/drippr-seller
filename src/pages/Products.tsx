@@ -411,7 +411,7 @@ export default function Products() {
     setLoadingDetails(true);
     try {
       const idToken = await getIdToken();
-      const r = await fetch(`/api/seller/products/update?op=details&id=${encodeURIComponent(productId)}`, {
+      const r = await fetch(`/api/admin/products/update?op=details&id=${encodeURIComponent(productId)}`, {
         headers: { Authorization: `Bearer ${idToken}` },
       });
       const j = await r.json();
@@ -533,7 +533,7 @@ export default function Products() {
         variantDraft = { options: enabledOptions, variants };
       }
 
-      const r = await fetch("/api/seller/products/update", {
+      const r = await fetch("/api/admin/products/update", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
         body: JSON.stringify({
