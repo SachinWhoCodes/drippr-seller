@@ -21,6 +21,7 @@ import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged } from "firebase/auth";
 import { collection, onSnapshot, orderBy, query, where } from "firebase/firestore";
 
+/** ---------------- Types ---------------- */
 type StagedTarget = {
   url: string;
   resourceUrl: string;
@@ -30,14 +31,17 @@ type StagedTarget = {
 type MerchantProduct = {
   id: string;
   title: string;
+  description?: string;
   price?: number;
   productType?: string;
-  status?: "pending" | "approved" | "rejected";
+  status?: "pending" | "approved" | "rejected" | "update_in_review";
   images?: string[];
   image?: string;
   createdAt?: number;
   sku?: string;
   stock?: number;
+  tags?: string[];
+  vendor?: string | null;
 };
 
 type VariantOption = { name: string; values: string[] };
@@ -61,6 +65,7 @@ function cartesian<T>(arrs: T[][]): T[][] {
   );
 }
 
+/** --------------- Component --------------- */
 export default function Products() {
   // ----- add form state -----
   const [isAddProductOpen, setIsAddProductOpen] = useState(false);
@@ -105,13 +110,12 @@ export default function Products() {
     );
   }, [products, search]);
 
-  // ====== Variants builder state ======
+  /** ====== Variants builder state (shared by Add & Edit) ====== */
   // Up to 3 options
   const [options, setOptions] = useState<VariantOption[]>([
     { name: "Size", values: [] },
     { name: "Color", values: [] },
   ]);
-
   // Temp inputs for adding values quickly
   const [valueInputs, setValueInputs] = useState<string[]>(["", "", ""]);
 
@@ -131,15 +135,11 @@ export default function Products() {
   function removeOptionRow(idx: number) {
     setOptions(prev => prev.filter((_, i) => i !== idx));
     setValueInputs(prev => prev.filter((_, i) => i !== idx));
-    // also prune variantRows later via recompute
   }
   function addValue(idx: number) {
     const raw = (valueInputs[idx] || "").trim();
     if (!raw) return;
-    const values = raw
-      .split(",")
-      .map(s => s.trim())
-      .filter(Boolean);
+    const values = raw.split(",").map(s => s.trim()).filter(Boolean);
     setOptions(prev => {
       const next = [...prev];
       const existing = new Set(next[idx].values);
@@ -191,8 +191,14 @@ export default function Products() {
     });
   }, [comboKeys]);
 
-  // ====== helpers ======
-  const handleAddProduct = () => setIsAddProductOpen(true);
+  /** ====== helpers ====== */
+  const handleAddProduct = () => {
+    // reset variant builder for fresh add
+    setOptions([{ name: "Size", values: [] }, { name: "Color", values: [] }]);
+    setValueInputs(["", "", ""]);
+    setVariantRows({});
+    setIsAddProductOpen(true);
+  };
 
   const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
@@ -249,7 +255,7 @@ export default function Products() {
     return target.resourceUrl;
   }
 
-  // ====== submit ======
+  /** ====== ADD submit ====== */
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!auth.currentUser) return toast.error("Please login again.");
@@ -301,7 +307,7 @@ export default function Products() {
       const enabledOptions = options.filter(o => (o?.name || "").trim() && o.values.length > 0);
       let variantDraft: undefined | {
         options: VariantOption[];
-        variants: Omit<VariantRow, "id">[]; // server doesn’t need the local id
+        variants: Omit<VariantRow, "id">[];
       } = undefined;
 
       if (enabledOptions.length > 0 && Object.keys(variantRows).length > 0) {
@@ -369,13 +375,126 @@ export default function Products() {
     }
   };
 
-  const handleEditProduct = (id: string) => toast.info(`Edit product ${id} (coming soon)`);
+  /** ====== EDIT flow ====== */
+  const [isEditOpen, setIsEditOpen] = useState(false);
+  const [editing, setEditing] = useState<MerchantProduct | null>(null);
+
+  // edit form fields
+  const [eTitle, setETitle] = useState("");
+  const [eDescription, setEDescription] = useState("");
+  const [ePrice, setEPrice] = useState<number | ''>('');
+  const [eStock, setEStock] = useState<number | ''>('');
+  const [eCompareAt, setECompareAt] = useState<number | ''>('');
+  const [eBarcode, setEBarcode] = useState("");
+  const [eWeight, setEWeight] = useState<number | ''>('');
+  const [eProductType, setEProductType] = useState("");
+  const [eVendor, setEVendor] = useState("");
+  const [eTags, setETags] = useState("");
+
+  function openEdit(p: MerchantProduct) {
+    setEditing(p);
+    // basic fields
+    setETitle(p.title || "");
+    setEDescription(p.description || "");
+    setEPrice(typeof p.price === "number" ? p.price : '');
+    setEStock(typeof p.stock === "number" ? p.stock : '');
+    setECompareAt('');
+    setEBarcode("");
+    setEWeight('');
+    setEProductType(p.productType || "");
+    setEVendor(p.vendor || "");
+    setETags((p.tags || []).join(", "));
+    // reset variant planner (seller can propose updates again)
+    setOptions([{ name: "Size", values: [] }, { name: "Color", values: [] }]);
+    setValueInputs(["", "", ""]);
+    setVariantRows({});
+    setIsEditOpen(true);
+  }
+
+  const handleEditProduct = (id: string) => {
+    const p = products.find(x => x.id === id);
+    if (!p) return toast.error("Product not found");
+    openEdit(p);
+  };
+
+  const handleEditSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editing) return;
+    try {
+      const idToken = await getIdToken();
+
+      // compute quick (instant) updates
+      const quick: { price?: number; quantity?: number } = {};
+      if (ePrice !== '' && ePrice !== editing.price) quick.price = Number(ePrice);
+      if (eStock !== '' && eStock !== editing.stock) quick.quantity = Number(eStock);
+
+      // other changes go for review
+      const changes: Record<string, any> = {};
+      if (eTitle.trim() && eTitle.trim() !== (editing.title || "")) changes.title = eTitle.trim();
+      if (eDescription.trim() !== (editing.description || "")) changes.description = eDescription.trim();
+      if (eProductType.trim() !== (editing.productType || "")) changes.productType = eProductType.trim();
+      if (eVendor.trim() !== (editing.vendor || "")) changes.vendor = eVendor.trim();
+      const newTags = eTags.split(",").map(t => t.trim()).filter(Boolean);
+      if (JSON.stringify(newTags) !== JSON.stringify(editing.tags || [])) changes.tags = newTags;
+      if (eCompareAt !== '') changes.compareAtPrice = Number(eCompareAt);
+      if (eBarcode.trim()) changes.barcode = eBarcode.trim();
+      if (eWeight !== '') changes.weightGrams = Number(eWeight);
+
+      // optional: updated variant plan
+      const enabledOptions = options.filter(o => (o?.name || "").trim() && o.values.length > 0);
+      let variantDraft: undefined | {
+        options: VariantOption[];
+        variants: Omit<VariantRow, "id">[];
+      } = undefined;
+      if (enabledOptions.length > 0 && Object.keys(variantRows).length > 0) {
+        const variants = Object.values(variantRows).map(v => ({
+          options: v.options,
+          title: v.title,
+          price: v.price,
+          compareAtPrice: v.compareAtPrice,
+          sku: (v.sku || "").trim() || undefined,
+          quantity: v.quantity,
+          barcode: (v.barcode || "").trim() || undefined,
+          weightGrams: v.weightGrams,
+        }));
+        variantDraft = { options: enabledOptions, variants };
+      }
+
+      // single endpoint: server will push quick to Shopify and queue the rest; also set status 'update_in_review' when needed
+      const r = await fetch("/api/seller/products/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
+        body: JSON.stringify({
+          id: editing.id,
+          quick: Object.keys(quick).length ? quick : undefined,
+          changes: Object.keys(changes).length ? changes : undefined,
+          variantDraft,
+        }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || "Update failed");
+
+      const quickMsg = quick.price != null || quick.quantity != null
+        ? " (price/stock changes live on store)"
+        : "";
+      const reviewMsg = (Object.keys(changes).length || variantDraft) ? " and the rest sent for review" : "";
+      toast.success(`Update saved${quickMsg}${reviewMsg}.`);
+
+      setIsEditOpen(false);
+      setEditing(null);
+    } catch (err: any) {
+      console.error(err);
+      toast.error(err?.message || "Failed to update product");
+    }
+  };
+
   const handleDeleteProduct = (id: string) => toast.error(`Delete product ${id} (coming soon)`);
 
-  // ----- UI -----
+  /** ----- UI ----- */
   return (
     <DashboardLayout>
       <div className="space-y-6">
+        {/* ADD dialog */}
         <Dialog open={isAddProductOpen} onOpenChange={setIsAddProductOpen}>
           <DialogContent className="max-w-5xl max-h-[90vh] overflow-y-auto">
             <DialogHeader>
@@ -435,7 +554,7 @@ export default function Products() {
               </div>
 
               <div className="grid grid-cols-2 gap-4">
-                {/* Base Price (used for default variant; admin can override per-variant later) */}
+                {/* Base Price */}
                 <div className="space-y-2">
                   <Label htmlFor="price">Base Price (₹) *</Label>
                   <Input id="price" name="price" type="number" placeholder="999" min={0} step="0.01" required />
@@ -505,186 +624,20 @@ export default function Products() {
                 <Input id="tags" name="tags" placeholder="casual, cotton, comfortable" />
               </div>
 
-              {/* ===== Variants (for Admin) ===== */}
-              <div className="space-y-3 border-t pt-4">
-                <h3 className="font-semibold">Variants (optional, for admin to configure in Shopify)</h3>
-
-                {/* Options editor */}
-                <div className="grid gap-4">
-                  {options.map((opt, idx) => (
-                    <div key={idx} className="rounded-md border p-3 space-y-3">
-                      <div className="flex items-center gap-2">
-                        <Label className="min-w-[80px]">Option {idx + 1}</Label>
-                        <Input
-                          value={opt.name}
-                          onChange={(e) => setOptionName(idx, e.target.value)}
-                          placeholder={idx === 0 ? "Size" : idx === 1 ? "Color" : "Material"}
-                          className="max-w-xs"
-                        />
-                        {options.length > 1 && (
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            onClick={() => removeOptionRow(idx)}
-                            className="ml-auto"
-                          >
-                            Remove
-                          </Button>
-                        )}
-                      </div>
-
-                      {/* Values pills */}
-                      <div className="flex flex-wrap gap-2">
-                        {opt.values.map((v) => (
-                          <Badge
-                            key={v}
-                            variant="outline"
-                            className="cursor-pointer"
-                            onClick={() => removeValue(idx, v)}
-                            title="Click to remove"
-                          >
-                            {v} <span className="ml-1 opacity-60">×</span>
-                          </Badge>
-                        ))}
-                      </div>
-
-                      {/* Add values */}
-                      <div className="flex items-center gap-2">
-                        <Input
-                          value={valueInputs[idx] || ""}
-                          onChange={(e) =>
-                            setValueInputs(prev => prev.map((v, i) => (i === idx ? e.target.value : v)))
-                          }
-                          placeholder="Enter values (comma separated), press Add"
-                        />
-                        <Button type="button" variant="secondary" onClick={() => addValue(idx)}>
-                          Add
-                        </Button>
-                      </div>
-                    </div>
-                  ))}
-
-                  {options.length < 3 && (
-                    <Button type="button" variant="outline" onClick={addOptionRow} className="w-fit">
-                      + Add another option
-                    </Button>
-                  )}
-                </div>
-
-                {/* Variants grid */}
-                {comboKeys.length > 0 && (
-                  <div className="space-y-2">
-                    <Label>Variant combinations</Label>
-                    <div className="overflow-x-auto rounded-md border">
-                      <table className="w-full text-sm">
-                        <thead className="bg-muted/50">
-                          <tr>
-                            <th className="text-left p-2">Variant</th>
-                            <th className="text-left p-2">Price (₹)</th>
-                            <th className="text-left p-2">Compare at (₹)</th>
-                            <th className="text-left p-2">SKU (optional)</th>
-                            <th className="text-left p-2">Qty</th>
-                            <th className="text-left p-2">Barcode</th>
-                            <th className="text-left p-2">Weight (g)</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {comboKeys.map((combo) => {
-                            const key = combo.join("|");
-                            const row = variantRows[key];
-                            return (
-                              <tr key={key} className="border-t">
-                                <td className="p-2">{row?.title || combo.join(" / ")}</td>
-                                <td className="p-2">
-                                  <Input
-                                    type="number"
-                                    min={0}
-                                    step="0.01"
-                                    value={row?.price ?? ""}
-                                    onChange={(e) =>
-                                      setVariantRows(prev => ({
-                                        ...prev,
-                                        [key]: { ...(prev[key]!), price: e.target.value ? Number(e.target.value) : undefined },
-                                      }))
-                                    }
-                                  />
-                                </td>
-                                <td className="p-2">
-                                  <Input
-                                    type="number"
-                                    min={0}
-                                    step="0.01"
-                                    value={row?.compareAtPrice ?? ""}
-                                    onChange={(e) =>
-                                      setVariantRows(prev => ({
-                                        ...prev,
-                                        [key]: { ...(prev[key]!), compareAtPrice: e.target.value ? Number(e.target.value) : undefined },
-                                      }))
-                                    }
-                                  />
-                                </td>
-                                <td className="p-2">
-                                  <Input
-                                    value={row?.sku ?? ""}
-                                    onChange={(e) =>
-                                      setVariantRows(prev => ({
-                                        ...prev,
-                                        [key]: { ...(prev[key]!), sku: e.target.value },
-                                      }))
-                                    }
-                                    placeholder="optional"
-                                  />
-                                </td>
-                                <td className="p-2">
-                                  <Input
-                                    type="number"
-                                    min={0}
-                                    value={row?.quantity ?? ""}
-                                    onChange={(e) =>
-                                      setVariantRows(prev => ({
-                                        ...prev,
-                                        [key]: { ...(prev[key]!), quantity: e.target.value ? Number(e.target.value) : undefined },
-                                      }))
-                                    }
-                                  />
-                                </td>
-                                <td className="p-2">
-                                  <Input
-                                    value={row?.barcode ?? ""}
-                                    onChange={(e) =>
-                                      setVariantRows(prev => ({
-                                        ...prev,
-                                        [key]: { ...(prev[key]!), barcode: e.target.value },
-                                      }))
-                                    }
-                                  />
-                                </td>
-                                <td className="p-2">
-                                  <Input
-                                    type="number"
-                                    min={0}
-                                    value={row?.weightGrams ?? ""}
-                                    onChange={(e) =>
-                                      setVariantRows(prev => ({
-                                        ...prev,
-                                        [key]: { ...(prev[key]!), weightGrams: e.target.value ? Number(e.target.value) : undefined },
-                                      }))
-                                    }
-                                  />
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      These variants are <b>not</b> sent to Shopify yet. Admin will create real Shopify variants based on this plan.
-                    </p>
-                  </div>
-                )}
-              </div>
+              {/* ===== Variants (plan for Admin) ===== */}
+              <VariantPlanner
+                options={options}
+                setOptionName={setOptionName}
+                removeOptionRow={removeOptionRow}
+                valueInputs={valueInputs}
+                setValueInputs={setValueInputs}
+                addValue={addValue}
+                removeValue={removeValue}
+                addOptionRow={addOptionRow}
+                comboKeys={comboKeys}
+                variantRows={variantRows}
+                setVariantRows={setVariantRows}
+              />
 
               {/* SEO */}
               <div className="space-y-4 border-t pt-4">
@@ -793,9 +746,17 @@ export default function Products() {
                         ? "bg-success/10 text-success border-success/20"
                         : p.status === "pending"
                         ? "bg-warning/10 text-warning border-warning/20"
+                        : p.status === "update_in_review"
+                        ? "bg-primary/10 text-primary border-primary/20"
                         : "bg-muted text-muted-foreground border-muted";
                     const statusText =
-                      p.status === "approved" ? "Active" : p.status === "pending" ? "In review" : "Rejected";
+                      p.status === "approved"
+                        ? "Active"
+                        : p.status === "pending"
+                        ? "In review"
+                        : p.status === "update_in_review"
+                        ? "Update in review"
+                        : "Rejected";
                     return (
                       <TableRow key={p.id}>
                         <TableCell>
@@ -843,7 +804,325 @@ export default function Products() {
             </div>
           </CardContent>
         </Card>
+
+        {/* EDIT dialog */}
+        <Dialog open={isEditOpen} onOpenChange={setIsEditOpen}>
+          <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+            <DialogHeader>
+              <DialogTitle>Edit Product</DialogTitle>
+            </DialogHeader>
+
+            {editing && (
+              <form onSubmit={handleEditSubmit} className="space-y-6">
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label>Title</Label>
+                    <Input value={eTitle} onChange={(e) => setETitle(e.target.value)} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Product Type</Label>
+                    <Input value={eProductType} onChange={(e) => setEProductType(e.target.value)} />
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Description</Label>
+                  <Textarea value={eDescription} onChange={(e) => setEDescription(e.target.value)} rows={4} />
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label>Price (₹) — pushes live immediately</Label>
+                    <Input
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      value={ePrice}
+                      onChange={(e) => setEPrice(e.target.value === "" ? "" : Number(e.target.value))}
+                      placeholder="Leave unchanged to keep current"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Stock (Qty) — pushes live immediately</Label>
+                    <Input
+                      type="number"
+                      min={0}
+                      value={eStock}
+                      onChange={(e) => setEStock(e.target.value === "" ? "" : Number(e.target.value))}
+                      placeholder="Leave unchanged to keep current"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="space-y-2">
+                    <Label>Compare at (₹)</Label>
+                    <Input
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      value={eCompareAt}
+                      onChange={(e) => setECompareAt(e.target.value === "" ? "" : Number(e.target.value))}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Barcode</Label>
+                    <Input value={eBarcode} onChange={(e) => setEBarcode(e.target.value)} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Weight (grams)</Label>
+                    <Input
+                      type="number"
+                      min={0}
+                      value={eWeight}
+                      onChange={(e) => setEWeight(e.target.value === "" ? "" : Number(e.target.value))}
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label>Vendor</Label>
+                    <Input value={eVendor} onChange={(e) => setEVendor(e.target.value)} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Tags (comma-separated)</Label>
+                    <Input value={eTags} onChange={(e) => setETags(e.target.value)} />
+                  </div>
+                </div>
+
+                {/* Variant plan (optional) */}
+                <div className="border-t pt-4">
+                  <h3 className="font-semibold mb-2">Propose variant changes (sent to admin, not live)</h3>
+                  <VariantPlanner
+                    options={options}
+                    setOptionName={setOptionName}
+                    removeOptionRow={removeOptionRow}
+                    valueInputs={valueInputs}
+                    setValueInputs={setValueInputs}
+                    addValue={addValue}
+                    removeValue={removeValue}
+                    addOptionRow={addOptionRow}
+                    comboKeys={comboKeys}
+                    variantRows={variantRows}
+                    setVariantRows={setVariantRows}
+                  />
+                  <p className="text-xs text-muted-foreground mt-2">
+                    Note: Price/stock above are updated live on Shopify; the rest goes to admin review and your product status becomes <b>Update in review</b>.
+                  </p>
+                </div>
+
+                <div className="flex justify-end gap-2">
+                  <Button type="button" variant="outline" onClick={() => setIsEditOpen(false)}>
+                    Cancel
+                  </Button>
+                  <Button type="submit">Save changes</Button>
+                </div>
+              </form>
+            )}
+          </DialogContent>
+        </Dialog>
       </div>
     </DashboardLayout>
+  );
+}
+
+/** ---- Small reusable section for the variant plan UI ---- */
+function VariantPlanner(props: {
+  options: VariantOption[];
+  setOptionName: (i: number, name: string) => void;
+  removeOptionRow: (i: number) => void;
+  valueInputs: string[];
+  setValueInputs: React.Dispatch<React.SetStateAction<string[]>>;
+  addValue: (i: number) => void;
+  removeValue: (i: number, v: string) => void;
+  addOptionRow: () => void;
+  comboKeys: string[][];
+  variantRows: Record<string, VariantRow>;
+  setVariantRows: React.Dispatch<React.SetStateAction<Record<string, VariantRow>>>;
+}) {
+  const {
+    options, setOptionName, removeOptionRow, valueInputs, setValueInputs,
+    addValue, removeValue, addOptionRow, comboKeys, variantRows, setVariantRows
+  } = props;
+
+  return (
+    <div className="space-y-3">
+      {/* Options editor */}
+      <div className="grid gap-4">
+        {options.map((opt, idx) => (
+          <div key={idx} className="rounded-md border p-3 space-y-3">
+            <div className="flex items-center gap-2">
+              <Label className="min-w-[80px]">Option {idx + 1}</Label>
+              <Input
+                value={opt.name}
+                onChange={(e) => setOptionName(idx, e.target.value)}
+                placeholder={idx === 0 ? "Size" : idx === 1 ? "Color" : "Material"}
+                className="max-w-xs"
+              />
+              {options.length > 1 && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => removeOptionRow(idx)}
+                  className="ml-auto"
+                >
+                  Remove
+                </Button>
+              )}
+            </div>
+
+            {/* Values pills */}
+            <div className="flex flex-wrap gap-2">
+              {opt.values.map((v) => (
+                <Badge
+                  key={v}
+                  variant="outline"
+                  className="cursor-pointer"
+                  onClick={() => removeValue(idx, v)}
+                  title="Click to remove"
+                >
+                  {v} <span className="ml-1 opacity-60">×</span>
+                </Badge>
+              ))}
+            </div>
+
+            {/* Add values */}
+            <div className="flex items-center gap-2">
+              <Input
+                value={valueInputs[idx] || ""}
+                onChange={(e) =>
+                  setValueInputs(prev => prev.map((v, i) => (i === idx ? e.target.value : v)))
+                }
+                placeholder="Enter values (comma separated), press Add"
+              />
+              <Button type="button" variant="secondary" onClick={() => addValue(idx)}>
+                Add
+              </Button>
+            </div>
+          </div>
+        ))}
+
+        {options.length < 3 && (
+          <Button type="button" variant="outline" onClick={addOptionRow} className="w-fit">
+            + Add another option
+          </Button>
+        )}
+      </div>
+
+      {/* Variants grid */}
+      {comboKeys.length > 0 && (
+        <div className="space-y-2">
+          <Label>Variant combinations</Label>
+          <div className="overflow-x-auto rounded-md border">
+            <table className="w-full text-sm">
+              <thead className="bg-muted/50">
+                <tr>
+                  <th className="text-left p-2">Variant</th>
+                  <th className="text-left p-2">Price (₹)</th>
+                  <th className="text-left p-2">Compare at (₹)</th>
+                  <th className="text-left p-2">SKU (optional)</th>
+                  <th className="text-left p-2">Qty</th>
+                  <th className="text-left p-2">Barcode</th>
+                  <th className="text-left p-2">Weight (g)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {comboKeys.map((combo) => {
+                  const key = combo.join("|");
+                  const row = variantRows[key];
+                  return (
+                    <tr key={key} className="border-t">
+                      <td className="p-2">{row?.title || combo.join(" / ")}</td>
+                      <td className="p-2">
+                        <Input
+                          type="number"
+                          min={0}
+                          step="0.01"
+                          value={row?.price ?? ""}
+                          onChange={(e) =>
+                            setVariantRows(prev => ({
+                              ...prev,
+                              [key]: { ...(prev[key]!), price: e.target.value ? Number(e.target.value) : undefined },
+                            }))
+                          }
+                        />
+                      </td>
+                      <td className="p-2">
+                        <Input
+                          type="number"
+                          min={0}
+                          step="0.01"
+                          value={row?.compareAtPrice ?? ""}
+                          onChange={(e) =>
+                            setVariantRows(prev => ({
+                              ...prev,
+                              [key]: { ...(prev[key]!), compareAtPrice: e.target.value ? Number(e.target.value) : undefined },
+                            }))
+                          }
+                        />
+                      </td>
+                      <td className="p-2">
+                        <Input
+                          value={row?.sku ?? ""}
+                          onChange={(e) =>
+                            setVariantRows(prev => ({
+                              ...prev,
+                              [key]: { ...(prev[key]!), sku: e.target.value },
+                            }))
+                          }
+                          placeholder="optional"
+                        />
+                      </td>
+                      <td className="p-2">
+                        <Input
+                          type="number"
+                          min={0}
+                          value={row?.quantity ?? ""}
+                          onChange={(e) =>
+                            setVariantRows(prev => ({
+                              ...prev,
+                              [key]: { ...(prev[key]!), quantity: e.target.value ? Number(e.target.value) : undefined },
+                            }))
+                          }
+                        />
+                      </td>
+                      <td className="p-2">
+                        <Input
+                          value={row?.barcode ?? ""}
+                          onChange={(e) =>
+                            setVariantRows(prev => ({
+                              ...prev,
+                              [key]: { ...(prev[key]!), barcode: e.target.value },
+                            }))
+                          }
+                        />
+                      </td>
+                      <td className="p-2">
+                        <Input
+                          type="number"
+                          min={0}
+                          value={row?.weightGrams ?? ""}
+                          onChange={(e) =>
+                            setVariantRows(prev => ({
+                              ...prev,
+                              [key]: { ...(prev[key]!), weightGrams: e.target.value ? Number(e.target.value) : undefined },
+                            }))
+                          }
+                        />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            These variants are <b>not</b> sent to Shopify yet. Admin will create real Shopify variants based on this plan.
+          </p>
+        </div>
+      )}
+    </div>
   );
 }
