@@ -57,6 +57,17 @@ type VariantRow = {
   weightGrams?: number;
 };
 
+type ExistingVariant = {
+  id: string; // Shopify GID
+  title: string;
+  optionValues: string[]; // ["Red","M"]
+  price?: number;
+  quantity?: number;
+  sku?: string;
+  barcode?: string;
+  weightGrams?: number;
+};
+
 function cartesian<T>(arrs: T[][]): T[][] {
   if (arrs.length === 0) return [];
   return arrs.reduce<T[][]>(
@@ -110,13 +121,11 @@ export default function Products() {
     );
   }, [products, search]);
 
-  /** ====== Variants builder state (shared by Add & Edit) ====== */
-  // Up to 3 options
+  /** ====== Variants builder state (used by Add & Edit) ====== */
   const [options, setOptions] = useState<VariantOption[]>([
     { name: "Size", values: [] },
     { name: "Color", values: [] },
   ]);
-  // Temp inputs for adding values quickly
   const [valueInputs, setValueInputs] = useState<string[]>(["", "", ""]);
 
   function setOptionName(idx: number, name: string) {
@@ -168,7 +177,6 @@ export default function Products() {
 
   // Keep editable per-variant rows in state, keyed by "opt1|opt2|opt3"
   const [variantRows, setVariantRows] = useState<Record<string, VariantRow>>({});
-  // re-seed rows when combos change (preserve existing edits)
   useEffect(() => {
     setVariantRows(prev => {
       const next: Record<string, VariantRow> = {};
@@ -193,7 +201,6 @@ export default function Products() {
 
   /** ====== helpers ====== */
   const handleAddProduct = () => {
-    // reset variant builder for fresh add
     setOptions([{ name: "Size", values: [] }, { name: "Color", values: [] }]);
     setValueInputs(["", "", ""]);
     setVariantRows({});
@@ -264,7 +271,6 @@ export default function Products() {
     const title = String(form.get("title") || "").trim();
     const description = String(form.get("description") || "").trim();
 
-    // variant / inventory fields for base/default
     const price = Number(form.get("price") || 0);
     const compareAtPrice = Number(form.get("compare-price") || 0) || undefined;
     const cost = Number(form.get("cost") || 0) || undefined;
@@ -272,7 +278,6 @@ export default function Products() {
     const weightGrams = Number(form.get("weight") || 0) || undefined;
     const quantity = Number(form.get("quantity") || 0) || 0;
 
-    // product meta
     const vendor = String(form.get("vendor") || "").trim() || undefined;
     const productType = String(form.get("product-type") || "").trim() || undefined;
     const tagsCsv = String(form.get("tags") || "");
@@ -290,7 +295,6 @@ export default function Products() {
       setBusy(true);
       const idToken = await getIdToken();
 
-      // 1) staged uploads (if images picked)
       const localFiles = selectedImages.slice(0, 5);
       let resourceUrls: string[] = [];
       if (localFiles.length) {
@@ -303,7 +307,6 @@ export default function Products() {
         }
       }
 
-      // 2) prepare variantDraft ONLY for admin (not sent to Shopify now)
       const enabledOptions = options.filter(o => (o?.name || "").trim() && o.values.length > 0);
       let variantDraft: undefined | {
         options: VariantOption[];
@@ -324,7 +327,6 @@ export default function Products() {
         variantDraft = { options: enabledOptions, variants };
       }
 
-      // 3) create product (server creates a single default variant on Shopify)
       const body = {
         title,
         description,
@@ -342,10 +344,8 @@ export default function Products() {
         resourceUrls,
         vendor,
         productType,
-        // UI choice; server will coerce to DRAFT when variantDraft exists
         status: statusSel,
         seo: seoTitle || seoDescription ? { title: seoTitle, description: seoDescription } : undefined,
-        // NEW: store the seller-proposed variants for admin
         variantDraft,
       };
 
@@ -363,7 +363,6 @@ export default function Products() {
       setImagePreviews([]);
       (e.target as HTMLFormElement).reset();
 
-      // reset options/variants builder
       setOptions([{ name: "Size", values: [] }, { name: "Color", values: [] }]);
       setValueInputs(["", "", ""]);
       setVariantRows({});
@@ -379,11 +378,11 @@ export default function Products() {
   const [isEditOpen, setIsEditOpen] = useState(false);
   const [editing, setEditing] = useState<MerchantProduct | null>(null);
 
-  // edit form fields
+  // edit fields
   const [eTitle, setETitle] = useState("");
   const [eDescription, setEDescription] = useState("");
-  const [ePrice, setEPrice] = useState<number | ''>('');
-  const [eStock, setEStock] = useState<number | ''>('');
+  const [ePrice, setEPrice] = useState<number | ''>(''); // for single-variant/global
+  const [eStock, setEStock] = useState<number | ''>(''); // for single-variant/global
   const [eCompareAt, setECompareAt] = useState<number | ''>('');
   const [eBarcode, setEBarcode] = useState("");
   const [eWeight, setEWeight] = useState<number | ''>('');
@@ -391,9 +390,59 @@ export default function Products() {
   const [eVendor, setEVendor] = useState("");
   const [eTags, setETags] = useState("");
 
+  // existing variants (from Shopify) + local edits/removals
+  const [loadingDetails, setLoadingDetails] = useState(false);
+  const [existingVariants, setExistingVariants] = useState<ExistingVariant[]>([]);
+  const [removeVariantIds, setRemoveVariantIds] = useState<Record<string, boolean>>({});
+  const [variantQuickEdits, setVariantQuickEdits] = useState<Record<string, { price?: number | ''; quantity?: number | '' }>>({}); // keyed by variant.id
+
+  function markRemove(vid: string, checked: boolean) {
+    setRemoveVariantIds(prev => ({ ...prev, [vid]: checked }));
+  }
+
+  function setVariantEdit(vid: string, key: "price" | "quantity", value: number | '') {
+    setVariantQuickEdits(prev => ({
+      ...prev,
+      [vid]: { ...(prev[vid] || {}), [key]: value }
+    }));
+  }
+
+  async function fetchDetails(productId: string) {
+    setLoadingDetails(true);
+    try {
+      const idToken = await getIdToken();
+      const r = await fetch(`/api/seller/products/update?op=details&id=${encodeURIComponent(productId)}`, {
+        headers: { Authorization: `Bearer ${idToken}` },
+      });
+      const j = await r.json();
+      if (!r.ok || !j.ok) throw new Error(j.error || "Failed to load product details");
+
+      // j.product: { title, description, productOptions, variants }
+      const prod = j.product || {};
+      const prodOptions: VariantOption[] = Array.isArray(prod.productOptions) ? prod.productOptions : [];
+      const variants: ExistingVariant[] = Array.isArray(prod.variants) ? prod.variants : [];
+
+      // Prefill options editor with live option names/values
+      if (prodOptions.length) {
+        setOptions(prodOptions.map((o: any) => ({ name: o.name || "", values: Array.from(new Set(o.values || [])) })));
+        setValueInputs(["", "", ""]);
+        setVariantRows({}); // planner is for *new* combos only
+      }
+
+      // Fill existing variants
+      setExistingVariants(variants);
+      setRemoveVariantIds({});
+      setVariantQuickEdits({});
+    } catch (e: any) {
+      console.error(e);
+      toast.error(e?.message || "Failed to load product details");
+    } finally {
+      setLoadingDetails(false);
+    }
+  }
+
   function openEdit(p: MerchantProduct) {
     setEditing(p);
-    // basic fields
     setETitle(p.title || "");
     setEDescription(p.description || "");
     setEPrice(typeof p.price === "number" ? p.price : '');
@@ -404,11 +453,12 @@ export default function Products() {
     setEProductType(p.productType || "");
     setEVendor(p.vendor || "");
     setETags((p.tags || []).join(", "));
-    // reset variant planner (seller can propose updates again)
+    // planner defaults until details load
     setOptions([{ name: "Size", values: [] }, { name: "Color", values: [] }]);
     setValueInputs(["", "", ""]);
     setVariantRows({});
     setIsEditOpen(true);
+    fetchDetails(p.id); // fetch variants/options
   }
 
   const handleEditProduct = (id: string) => {
@@ -423,12 +473,29 @@ export default function Products() {
     try {
       const idToken = await getIdToken();
 
-      // compute quick (instant) updates
-      const quick: { price?: number; quantity?: number } = {};
+      // quick updates (global/single-variant)
+      const quick: {
+        price?: number;
+        quantity?: number;
+        variants?: Array<{ id: string; price?: number; quantity?: number }>;
+      } = {};
+
       if (ePrice !== '' && ePrice !== editing.price) quick.price = Number(ePrice);
       if (eStock !== '' && eStock !== editing.stock) quick.quantity = Number(eStock);
 
-      // other changes go for review
+      // per-variant quick edits (price/quantity)
+      const perVar: Array<{ id: string; price?: number; quantity?: number }> = [];
+      for (const v of existingVariants) {
+        const edits = variantQuickEdits[v.id];
+        if (!edits) continue;
+        const next: { id: string; price?: number; quantity?: number } = { id: v.id };
+        if (edits.price !== '' && Number(edits.price) !== (v.price ?? undefined)) next.price = Number(edits.price as number);
+        if (edits.quantity !== '' && Number(edits.quantity) !== (v.quantity ?? undefined)) next.quantity = Number(edits.quantity as number);
+        if (next.price != null || next.quantity != null) perVar.push(next);
+      }
+      if (perVar.length) quick.variants = perVar;
+
+      // other changes (review)
       const changes: Record<string, any> = {};
       if (eTitle.trim() && eTitle.trim() !== (editing.title || "")) changes.title = eTitle.trim();
       if (eDescription.trim() !== (editing.description || "")) changes.description = eDescription.trim();
@@ -440,7 +507,13 @@ export default function Products() {
       if (eBarcode.trim()) changes.barcode = eBarcode.trim();
       if (eWeight !== '') changes.weightGrams = Number(eWeight);
 
-      // optional: updated variant plan
+      // removals (review)
+      const toRemove = Object.entries(removeVariantIds)
+        .filter(([, on]) => on)
+        .map(([vid]) => vid);
+      if (toRemove.length) changes.removeVariantIds = toRemove;
+
+      // additions via planner (review)
       const enabledOptions = options.filter(o => (o?.name || "").trim() && o.values.length > 0);
       let variantDraft: undefined | {
         options: VariantOption[];
@@ -460,7 +533,6 @@ export default function Products() {
         variantDraft = { options: enabledOptions, variants };
       }
 
-      // single endpoint: server will push quick to Shopify and queue the rest; also set status 'update_in_review' when needed
       const r = await fetch("/api/seller/products/update", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
@@ -474,11 +546,11 @@ export default function Products() {
       const j = await r.json().catch(() => ({}));
       if (!r.ok || !j.ok) throw new Error(j.error || "Update failed");
 
-      const quickMsg = quick.price != null || quick.quantity != null
-        ? " (price/stock changes live on store)"
-        : "";
-      const reviewMsg = (Object.keys(changes).length || variantDraft) ? " and the rest sent for review" : "";
-      toast.success(`Update saved${quickMsg}${reviewMsg}.`);
+      const live = (quick.price != null || quick.quantity != null || (quick.variants && quick.variants.length));
+      const review = (Object.keys(changes).length || variantDraft);
+      toast.success(
+        `Update saved${live ? " (price/stock live)" : ""}${review ? " and other changes sent for review" : ""}.`
+      );
 
       setIsEditOpen(false);
       setEditing(null);
@@ -554,7 +626,6 @@ export default function Products() {
               </div>
 
               <div className="grid grid-cols-2 gap-4">
-                {/* Base Price */}
                 <div className="space-y-2">
                   <Label htmlFor="price">Base Price (₹) *</Label>
                   <Input id="price" name="price" type="number" placeholder="999" min={0} step="0.01" required />
@@ -807,13 +878,14 @@ export default function Products() {
 
         {/* EDIT dialog */}
         <Dialog open={isEditOpen} onOpenChange={setIsEditOpen}>
-          <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+          <DialogContent className="max-w-5xl max-h-[90vh] overflow-y-auto">
             <DialogHeader>
               <DialogTitle>Edit Product</DialogTitle>
             </DialogHeader>
 
             {editing && (
               <form onSubmit={handleEditSubmit} className="space-y-6">
+                {/* Basics */}
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <Label>Title</Label>
@@ -830,6 +902,7 @@ export default function Products() {
                   <Textarea value={eDescription} onChange={(e) => setEDescription(e.target.value)} rows={4} />
                 </div>
 
+                {/* Global quick (for single-variant products) */}
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <Label>Price (₹) — pushes live immediately</Label>
@@ -854,13 +927,14 @@ export default function Products() {
                   </div>
                 </div>
 
+                {/* Other review fields */}
                 <div className="grid grid-cols-3 gap-4">
                   <div className="space-y-2">
                     <Label>Compare at (₹)</Label>
                     <Input
                       type="number"
                       min={0}
-                      step="0.01"
+                      step={0.01}
                       value={eCompareAt}
                       onChange={(e) => setECompareAt(e.target.value === "" ? "" : Number(e.target.value))}
                     />
@@ -891,9 +965,80 @@ export default function Products() {
                   </div>
                 </div>
 
-                {/* Variant plan (optional) */}
+                {/* Existing variants (live) */}
                 <div className="border-t pt-4">
-                  <h3 className="font-semibold mb-2">Propose variant changes (sent to admin, not live)</h3>
+                  <h3 className="font-semibold mb-2">Existing variants (live)</h3>
+                  {loadingDetails ? (
+                    <div className="text-sm text-muted-foreground">Loading variants…</div>
+                  ) : existingVariants.length === 0 ? (
+                    <div className="text-sm text-muted-foreground">No variants found.</div>
+                  ) : (
+                    <div className="overflow-x-auto rounded-md border">
+                      <table className="w-full text-sm">
+                        <thead className="bg-muted/50">
+                          <tr>
+                            <th className="text-left p-2">Variant</th>
+                            <th className="text-left p-2">SKU</th>
+                            <th className="text-left p-2">Barcode</th>
+                            <th className="text-left p-2">Price (₹)</th>
+                            <th className="text-left p-2">Stock</th>
+                            <th className="text-left p-2">Remove?</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {existingVariants.map((v) => {
+                            const edits = variantQuickEdits[v.id] || {};
+                            return (
+                              <tr key={v.id} className="border-t">
+                                <td className="p-2">{v.optionValues?.join(" / ") || v.title}</td>
+                                <td className="p-2">{v.sku || "—"}</td>
+                                <td className="p-2">{v.barcode || "—"}</td>
+                                <td className="p-2 w-[160px]">
+                                  <Input
+                                    type="number"
+                                    min={0}
+                                    step="0.01"
+                                    value={edits.price ?? (v.price ?? "")}
+                                    onChange={(e) =>
+                                      setVariantEdit(v.id, "price", e.target.value === "" ? "" : Number(e.target.value))
+                                    }
+                                  />
+                                </td>
+                                <td className="p-2 w-[140px]">
+                                  <Input
+                                    type="number"
+                                    min={0}
+                                    value={edits.quantity ?? (v.quantity ?? "")}
+                                    onChange={(e) =>
+                                      setVariantEdit(v.id, "quantity", e.target.value === "" ? "" : Number(e.target.value))
+                                    }
+                                  />
+                                </td>
+                                <td className="p-2 w-[100px]">
+                                  <label className="inline-flex items-center gap-2 text-xs">
+                                    <input
+                                      type="checkbox"
+                                      checked={!!removeVariantIds[v.id]}
+                                      onChange={(e) => markRemove(v.id, e.target.checked)}
+                                    />
+                                    Remove
+                                  </label>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                  <p className="text-xs text-muted-foreground mt-2">
+                    Editing price/stock above updates Shopify instantly. Removing variants and any other changes go to admin for review.
+                  </p>
+                </div>
+
+                {/* Add more variants (planner → review) */}
+                <div className="border-t pt-4">
+                  <h3 className="font-semibold mb-2">Add more variants (sent to admin)</h3>
                   <VariantPlanner
                     options={options}
                     setOptionName={setOptionName}
@@ -907,9 +1052,6 @@ export default function Products() {
                     variantRows={variantRows}
                     setVariantRows={setVariantRows}
                   />
-                  <p className="text-xs text-muted-foreground mt-2">
-                    Note: Price/stock above are updated live on Shopify; the rest goes to admin review and your product status becomes <b>Update in review</b>.
-                  </p>
                 </div>
 
                 <div className="flex justify-end gap-2">
@@ -1011,10 +1153,10 @@ function VariantPlanner(props: {
         )}
       </div>
 
-      {/* Variants grid */}
+      {/* Variants grid (new additions only) */}
       {comboKeys.length > 0 && (
         <div className="space-y-2">
-          <Label>Variant combinations</Label>
+          <Label>Variant combinations (to add)</Label>
           <div className="overflow-x-auto rounded-md border">
             <table className="w-full text-sm">
               <thead className="bg-muted/50">
@@ -1119,7 +1261,7 @@ function VariantPlanner(props: {
             </table>
           </div>
           <p className="text-xs text-muted-foreground">
-            These variants are <b>not</b> sent to Shopify yet. Admin will create real Shopify variants based on this plan.
+            These are <b>proposed additions</b>. Admin will create real Shopify variants based on this plan.
           </p>
         </div>
       )}
