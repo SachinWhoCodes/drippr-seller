@@ -48,7 +48,7 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
     <div className="flex h-full flex-col bg-sidebar">
       <div className="flex h-16 items-center border-b border-sidebar-border px-6">
         <Link to="/" className="flex items-center gap-2">
-          <img className="h-8 w-8 rounded-lg bg-primary flex items-center justify-center text-primary-foreground font-bold" src="../../public/logo_rounded.png" />
+          <img className="h-8 w-8 rounded-lg bg-primary flex items-center justify-center text-primary-foreground font-bold" src="../../logo_rounded.png" />
           {/* <div className="h-8 w-8 rounded-lg bg-primary flex items-center justify-center text-primary-foreground font-bold">
             D
           </div> */}
