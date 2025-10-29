@@ -77,9 +77,7 @@ export default function Login() {
 
       <Card className="w-full max-w-md">
         <CardHeader className="text-center">
-          <div className="mx-auto mb-4 h-12 w-12 rounded-lg bg-primary flex items-center justify-center text-primary-foreground font-bold text-2xl">
-            D
-          </div>
+          <img className="mx-auto mb-4 h-12 w-12 rounded-lg bg-primary flex items-center justify-center text-primary-foreground font-bold text-2xl" src="../../logo_rounded.png" />
           <CardTitle className="text-2xl">Login</CardTitle>
           <CardDescription>Access your DRIPPR seller dashboard</CardDescription>
         </CardHeader>

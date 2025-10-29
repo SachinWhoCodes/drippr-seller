@@ -73,9 +73,7 @@ export default function Landing() {
       <nav className="border-b bg-card">
         <div className="container mx-auto flex h-16 items-center justify-between px-4">
           <div className="flex items-center gap-2">
-            <div className="h-8 w-8 rounded-lg bg-primary flex items-center justify-center text-primary-foreground font-bold">
-              D
-            </div>
+            <img className="h-8 w-8 rounded-lg bg-primary flex items-center justify-center text-primary-foreground font-bold" src="../../logo_rounded.png" />
             <span className="text-xl font-bold">DRIPPR</span>
           </div>
           <div className="flex items-center gap-4">
