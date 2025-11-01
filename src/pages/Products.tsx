@@ -411,8 +411,13 @@ export default function Products() {
     setLoadingDetails(true);
     try {
       const idToken = await getIdToken();
-      const r = await fetch(`/api/admin/products/update?op=details&id=${encodeURIComponent(productId)}`, {
-        headers: { Authorization: `Bearer ${idToken}` },
+      const r = await fetch("/api/admin/products/update", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify({ op: "details", id: productId }),
       });
       const j = await r.json();
       if (!r.ok || !j.ok) throw new Error(j.error || "Failed to load product details");
@@ -434,12 +439,13 @@ export default function Products() {
       setRemoveVariantIds({});
       setVariantQuickEdits({});
     } catch (e: any) {
-      console.error(e);
       toast.error(e?.message || "Failed to load product details");
     } finally {
       setLoadingDetails(false);
     }
   }
+
+
 
   function openEdit(p: MerchantProduct) {
     setEditing(p);
