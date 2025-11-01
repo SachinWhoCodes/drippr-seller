@@ -31,6 +31,8 @@ type Merchant = {
   name?: string;
   phone?: string;
   storeName?: string;
+  businessName?: string;
+  displayName?: string;
   enabled?: boolean;
   createdAt?: number;
   businessCategory?: string;
@@ -162,10 +164,10 @@ export default function Merchants() {
                       className="cursor-pointer"
                       onClick={() => setSelectedMerchant(merchant)}
                     >
-                      <TableCell className="font-medium">{merchant.name || "-"}</TableCell>
+                      <TableCell className="font-medium">{merchant.displayName || "-"}</TableCell>
                       <TableCell>{merchant.email || "-"}</TableCell>
                       <TableCell>{merchant.phone || "-"}</TableCell>
-                      <TableCell>{merchant.storeName || "-"}</TableCell>
+                      <TableCell>{merchant.businessName || "-"}</TableCell>
                       <TableCell onClick={(e) => e.stopPropagation()}>
                         <Switch
                           checked={!!merchant.enabled}
