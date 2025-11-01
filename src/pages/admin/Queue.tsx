@@ -45,7 +45,7 @@ type VariantDraft = {
     sku?: string;
     barcode?: string;
     weightGrams?: number;
-    inventoryQty?: number;
+    quantity?: number;
   }>;
 };
 
@@ -139,7 +139,7 @@ function VariantDraftPreview({ variantDraft }: { variantDraft?: VariantDraft | n
                     <TableCell className="text-xs">{v.sku || "—"}</TableCell>
                     <TableCell className="text-xs">{v.barcode || "—"}</TableCell>
                     <TableCell>{v.weightGrams ?? "—"}</TableCell>
-                    <TableCell>{v.inventoryQty ?? "—"}</TableCell>
+                    <TableCell>{v.quantity ?? "—"}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
