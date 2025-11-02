@@ -411,39 +411,42 @@ export default function Products() {
     setLoadingDetails(true);
     try {
       const idToken = await getIdToken();
-      const r = await fetch("/api/admin/products/update", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${idToken}`,
-        },
-        body: JSON.stringify({ op: "details", id: productId }),
+      const r = await fetch(`/api/admin/products/update?id=${productId}&live=1`, {
+        headers: { Authorization: `Bearer ${idToken}` },
       });
       const j = await r.json();
       if (!r.ok || !j.ok) throw new Error(j.error || "Failed to load product details");
 
-      // j.product: { title, description, productOptions, variants }
-      const prod = j.product || {};
-      const prodOptions: VariantOption[] = Array.isArray(prod.productOptions) ? prod.productOptions : [];
-      const variants: ExistingVariant[] = Array.isArray(prod.variants) ? prod.variants : [];
+      // Live variants come from Shopify via the API response
+      const live = Array.isArray(j.liveVariants) ? j.liveVariants : [];
 
-      // Prefill options editor with live option names/values
-      if (prodOptions.length) {
-        setOptions(prodOptions.map((o: any) => ({ name: o.name || "", values: Array.from(new Set(o.values || [])) })));
-        setValueInputs(["", "", ""]);
-        setVariantRows({}); // planner is for *new* combos only
-      }
+      // Map to our ExistingVariant shape; optionValues may not be present, derive from title
+      const variants: ExistingVariant[] = live.map((v: any) => ({
+        id: v.id,
+        title: v.title || "",
+        optionValues: Array.isArray(v.optionValues) ? v.optionValues : (v.title ? String(v.title).split(" / ") : []),
+        price: v.price != null ? Number(v.price) : undefined,
+        quantity: v.inventoryQuantity != null ? Number(v.inventoryQuantity) : undefined,
+        sku: v.sku || undefined,
+        barcode: v.barcode || undefined,
+        weightGrams: v.weightGrams != null ? Number(v.weightGrams) : undefined,
+      }));
 
-      // Fill existing variants
+      // We don’t rely on productOptions here; planner is for *new* variants
       setExistingVariants(variants);
       setRemoveVariantIds({});
       setVariantQuickEdits({});
+      // reset planner for additions only
+      setOptions([{ name: "Size", values: [] }, { name: "Color", values: [] }]);
+      setValueInputs(["", "", ""]);
+      setVariantRows({});
     } catch (e: any) {
       toast.error(e?.message || "Failed to load product details");
     } finally {
       setLoadingDetails(false);
     }
   }
+
 
 
 
@@ -476,86 +479,80 @@ export default function Products() {
   const handleEditSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editing) return;
+
     try {
       const idToken = await getIdToken();
 
-      // quick updates (global/single-variant)
-      const quick: {
-        price?: number;
-        quantity?: number;
-        variants?: Array<{ id: string; price?: number; quantity?: number }>;
-      } = {};
+      // Build payload exactly as the /api/admin/products/update endpoint expects
+      const payload: any = { id: editing.id };
 
-      if (ePrice !== '' && ePrice !== editing.price) quick.price = Number(ePrice);
-      if (eStock !== '' && eStock !== editing.stock) quick.quantity = Number(eStock);
+      // 1) LIVE updates (push instantly to Shopify)
+      if (ePrice !== '' && ePrice !== editing.price) payload.price = Number(ePrice);
+      if (eStock !== '' && eStock !== editing.stock) payload.stockQty = Number(eStock);
 
-      // per-variant quick edits (price/quantity)
-      const perVar: Array<{ id: string; price?: number; quantity?: number }> = [];
-      for (const v of existingVariants) {
-        const edits = variantQuickEdits[v.id];
-        if (!edits) continue;
-        const next: { id: string; price?: number; quantity?: number } = { id: v.id };
-        if (edits.price !== '' && Number(edits.price) !== (v.price ?? undefined)) next.price = Number(edits.price as number);
-        if (edits.quantity !== '' && Number(edits.quantity) !== (v.quantity ?? undefined)) next.quantity = Number(edits.quantity as number);
-        if (next.price != null || next.quantity != null) perVar.push(next);
-      }
-      if (perVar.length) quick.variants = perVar;
+      // Optional: per-variant live edits (price/qty) from the “Existing variants” table
+      const variantUpdates = existingVariants
+        .map(v => {
+          const edits = variantQuickEdits[v.id];
+          if (!edits) return null;
+          const upd: any = { id: v.id };
+          if (edits.price !== '' && Number(edits.price) !== (v.price ?? undefined)) upd.price = Number(edits.price as number);
+          if (edits.quantity !== '' && Number(edits.quantity) !== (v.quantity ?? undefined)) upd.quantity = Number(edits.quantity as number);
+          return (upd.price != null || upd.quantity != null) ? upd : null;
+        })
+        .filter(Boolean) as Array<{ id: string; price?: number; quantity?: number }>;
+      if (variantUpdates.length) payload.variants = variantUpdates;
 
-      // other changes (review)
-      const changes: Record<string, any> = {};
-      if (eTitle.trim() && eTitle.trim() !== (editing.title || "")) changes.title = eTitle.trim();
-      if (eDescription.trim() !== (editing.description || "")) changes.description = eDescription.trim();
-      if (eProductType.trim() !== (editing.productType || "")) changes.productType = eProductType.trim();
-      if (eVendor.trim() !== (editing.vendor || "")) changes.vendor = eVendor.trim();
+      // 2) REVIEW updates (go to admin queue, sets status=update_in_review)
+      if (eTitle.trim() && eTitle.trim() !== (editing.title || "")) payload.title = eTitle.trim();
+      if (eDescription.trim() !== (editing.description || "")) payload.description = eDescription.trim();
+      if (eProductType.trim() !== (editing.productType || "")) payload.productType = eProductType.trim();
+      if (eVendor.trim() !== (editing.vendor || "")) payload.vendor = eVendor.trim();
       const newTags = eTags.split(",").map(t => t.trim()).filter(Boolean);
-      if (JSON.stringify(newTags) !== JSON.stringify(editing.tags || [])) changes.tags = newTags;
-      if (eCompareAt !== '') changes.compareAtPrice = Number(eCompareAt);
-      if (eBarcode.trim()) changes.barcode = eBarcode.trim();
-      if (eWeight !== '') changes.weightGrams = Number(eWeight);
+      if (JSON.stringify(newTags) !== JSON.stringify(editing.tags || [])) payload.tags = newTags;
+      if (eCompareAt !== '') payload.compareAtPrice = Number(eCompareAt);
+      if (eBarcode.trim()) payload.barcode = eBarcode.trim();
+      if (eWeight !== '') payload.weightGrams = Number(eWeight);
 
-      // removals (review)
+      // request to remove existing variants (review)
       const toRemove = Object.entries(removeVariantIds)
         .filter(([, on]) => on)
         .map(([vid]) => vid);
-      if (toRemove.length) changes.removeVariantIds = toRemove;
+      if (toRemove.length) payload.removeVariantIds = toRemove;
 
-      // additions via planner (review)
+      // proposed NEW variants (planner → review)
       const enabledOptions = options.filter(o => (o?.name || "").trim() && o.values.length > 0);
-      let variantDraft: undefined | {
-        options: VariantOption[];
-        variants: Omit<VariantRow, "id">[];
-      } = undefined;
       if (enabledOptions.length > 0 && Object.keys(variantRows).length > 0) {
-        const variants = Object.values(variantRows).map(v => ({
-          options: v.options,
-          title: v.title,
-          price: v.price,
-          compareAtPrice: v.compareAtPrice,
-          sku: (v.sku || "").trim() || undefined,
-          quantity: v.quantity,
-          barcode: (v.barcode || "").trim() || undefined,
-          weightGrams: v.weightGrams,
-        }));
-        variantDraft = { options: enabledOptions, variants };
+        payload.variantDraft = {
+          options: enabledOptions,
+          variants: Object.values(variantRows).map(v => ({
+            options: v.options,
+            title: v.title,
+            price: v.price,
+            compareAtPrice: v.compareAtPrice,
+            sku: v.sku || undefined,
+            quantity: v.quantity,
+            barcode: v.barcode || undefined,
+            weightGrams: v.weightGrams,
+          })),
+        };
       }
 
       const r = await fetch("/api/admin/products/update", {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
-        body: JSON.stringify({
-          id: editing.id,
-          quick: Object.keys(quick).length ? quick : undefined,
-          changes: Object.keys(changes).length ? changes : undefined,
-          variantDraft,
-        }),
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify(payload),
       });
       const j = await r.json().catch(() => ({}));
       if (!r.ok || !j.ok) throw new Error(j.error || "Update failed");
 
-      const live = (quick.price != null || quick.quantity != null || (quick.variants && quick.variants.length));
-      const review = (Object.keys(changes).length || variantDraft);
       toast.success(
-        `Update saved${live ? " (price/stock live)" : ""}${review ? " and other changes sent for review" : ""}.`
+        j.review
+          ? "Price/stock pushed. Other changes sent for review."
+          : "Updated successfully."
       );
 
       setIsEditOpen(false);
@@ -565,6 +562,7 @@ export default function Products() {
       toast.error(err?.message || "Failed to update product");
     }
   };
+
 
   const handleDeleteProduct = (id: string) => toast.error(`Delete product ${id} (coming soon)`);
 

@@ -2,11 +2,9 @@
 import { getAdmin } from "../../_lib/firebaseAdmin.js";
 import { shopifyGraphQL } from "../../_lib/shopify.js";
 
-/** --- GraphQL --- **/
-
-// Read minimal product info so we can (1) find a default variant, (2) get inventoryItem.id
-const PRODUCT_MIN = /* GraphQL */ `
-  query ProductMin($id: ID!) {
+// ---- Shopify bits (Admin API, not Storefront!) ----
+const PRODUCT_VARIANTS_QUERY = /* GraphQL */ `
+  query product($id: ID!) {
     product(id: $id) {
       id
       title
@@ -14,10 +12,11 @@ const PRODUCT_MIN = /* GraphQL */ `
         nodes {
           id
           title
+          sku
           price
           compareAtPrice
-          sku
           barcode
+          inventoryQuantity
           inventoryItem { id tracked }
         }
       }
@@ -26,7 +25,10 @@ const PRODUCT_MIN = /* GraphQL */ `
 `;
 
 const VARIANTS_BULK_UPDATE = /* GraphQL */ `
-  mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+  mutation productVariantsBulkUpdate(
+    $productId: ID!, 
+    $variants: [ProductVariantsBulkInput!]!
+  ) {
     productVariantsBulkUpdate(productId: $productId, variants: $variants) {
       productVariants { id }
       userErrors { field message }
@@ -34,190 +36,171 @@ const VARIANTS_BULK_UPDATE = /* GraphQL */ `
   }
 `;
 
-/**
- * Set absolute on-hand quantities by inventoryItemId(s).
- * Requires a valid SHOPIFY_LOCATION_ID
- */
-const SET_ON_HAND = /* GraphQL */ `
-  mutation inventorySetOnHandQuantities($input: [InventorySetOnHandQuantitiesInput!]!) {
+// optional – will push absolute qty only if you have a default location
+const INVENTORY_SET_ON_HAND = /* GraphQL */ `
+  mutation inventorySetOnHandQuantities($input: InventorySetOnHandQuantitiesInput!) {
     inventorySetOnHandQuantities(input: $input) {
-      inventoryLevels {
-        id
-        available
-        location { id }
-        item { id }
-      }
+      inventoryAdjustmentGroup { createdAt }
       userErrors { field message }
     }
   }
 `;
 
 export default async function handler(req: any, res: any) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
-  }
-
   try {
     const { adminAuth, adminDb } = getAdmin();
 
-    // --- auth (seller) ---
+    // --- auth ---
     const authHeader = String(req.headers.authorization || "");
     const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
     if (!token) return res.status(401).json({ ok: false, error: "Missing Authorization" });
+
     const decoded = await adminAuth.verifyIdToken(token);
-    const merchantId = decoded.uid;
+    const uid = decoded.uid;
 
-    const {
-      firestoreId,
-      shopifyProductId: shopifyProductIdBody,
-      liveVariantId,
+    if (req.method === "GET") {
+      // /api/admin/products/update?id=<firestoreDocId>&live=1
+      const id = String(req.query.id || "");
+      if (!id) return res.status(400).json({ ok: false, error: "Missing id" });
 
-      // instant updates
-      price,
-      compareAtPrice,
-      quantity,
+      const snap = await adminDb.collection("merchantProducts").doc(id).get();
+      if (!snap.exists) return res.status(404).json({ ok: false, error: "Not found" });
 
-      // queued edits for admin
-      title,
-      description,
-      tags,
-      images,
-      productType,
-      vendor,
-      variantDraft,
-      adminNote,
-    } = req.body || {};
-
-    if (!firestoreId) {
-      return res.status(400).json({ ok: false, error: "firestoreId is required" });
-    }
-
-    // --- read seller's doc ---
-    const docRef = adminDb.collection("merchantProducts").doc(firestoreId);
-    const snap = await docRef.get();
-    if (!snap.exists) return res.status(404).json({ ok: false, error: "Product not found" });
-
-    const doc = snap.data() || {};
-    if (String(doc.merchantId) !== merchantId) {
-      return res.status(403).json({ ok: false, error: "Forbidden" });
-    }
-
-    const shopifyProductId: string = shopifyProductIdBody || doc.shopifyProductId;
-    if (!shopifyProductId) {
-      return res.status(400).json({ ok: false, error: "Missing shopifyProductId" });
-    }
-
-    // --- fetch minimal product + variants from Shopify ---
-    const pRes = await shopifyGraphQL(PRODUCT_MIN, { id: shopifyProductId });
-    const pErrors = pRes.errors || pRes.data?.product?.userErrors || [];
-    if (pErrors.length) {
-      return res.status(400).json({ ok: false, error: Array.isArray(pErrors) ? pErrors.map((e: any) => e.message).join("; ") : "Shopify read failed" });
-    }
-    const product = pRes.data?.product;
-    if (!product) {
-      return res.status(404).json({ ok: false, error: "Shopify product not found" });
-    }
-    const variants: any[] = product.variants?.nodes || [];
-    if (!variants.length) {
-      return res.status(400).json({ ok: false, error: "Product has no variants on Shopify" });
-    }
-
-    // Determine which live variant to instantly update
-    const targetVariant = liveVariantId
-      ? variants.find((v) => v.id === liveVariantId)
-      : variants[0];
-
-    // --- 1) Instant price update (optional) ---
-    if (price != null || compareAtPrice != null) {
-      const payload = [{
-        id: String(targetVariant.id),
-        ...(price != null ? { price: String(price) } : {}),
-        ...(compareAtPrice != null ? { compareAtPrice: String(compareAtPrice) } : {}),
-      }];
-
-      const vRes = await shopifyGraphQL(VARIANTS_BULK_UPDATE, {
-        productId: shopifyProductId,
-        variants: payload,
-      });
-      const vErrs = vRes.data?.productVariantsBulkUpdate?.userErrors || [];
-      if (vErrs.length) {
-        // carry on but surface the error
-        console.warn("productVariantsBulkUpdate errors:", vErrs);
-        return res.status(400).json({ ok: false, error: vErrs.map((e: any) => e.message).join("; ") });
+      const doc = snap.data() || {};
+      // ensure the logged-in merchant can read their own product
+      if (doc.merchantId && doc.merchantId !== uid) {
+        return res.status(403).json({ ok: false, error: "Forbidden" });
       }
-    }
 
-    // --- 2) Instant stock update (optional) ---
-    const locationId = process.env.SHOPIFY_LOCATION_ID || "";
-    if (quantity != null && locationId) {
-      const inventoryItemId = targetVariant?.inventoryItem?.id;
-      if (inventoryItemId) {
-        const sRes = await shopifyGraphQL(SET_ON_HAND, {
-          input: [{
-            inventoryItemId,
-            locationId,
-            setOnHandQuantity: Number(quantity),
-          }],
-        });
-        const sErrs = sRes.data?.inventorySetOnHandQuantities?.userErrors || [];
-        if (sErrs.length) {
-          console.warn("inventorySetOnHandQuantities errors:", sErrs);
-          return res.status(400).json({ ok: false, error: sErrs.map((e: any) => e.message).join("; ") });
+      let liveVariants: any[] | undefined = undefined;
+      if (req.query.live) {
+        // NOTE: Admin API, price/compareAtPrice fields – do NOT use priceV2/weight, and no Storefront types.
+        if (doc.shopifyProductId) {
+          const r = await shopifyGraphQL(PRODUCT_VARIANTS_QUERY, { id: doc.shopifyProductId });
+          const pv = r?.data?.product?.variants?.nodes || [];
+          liveVariants = pv.map((v: any) => ({
+            id: v.id,
+            title: v.title,
+            sku: v.sku,
+            price: v.price,
+            compareAtPrice: v.compareAtPrice,
+            barcode: v.barcode,
+            inventoryQuantity: v.inventoryQuantity,
+            tracked: !!v.inventoryItem?.tracked,
+          }));
         }
       }
+
+      return res.status(200).json({
+        ok: true,
+        product: { id: snap.id, ...doc },
+        liveVariants,
+      });
     }
 
-    // --- 3) Queue all other edits for admin & mirror updates locally ---
-    const now = Date.now();
+    if (req.method === "POST") {
+      // Expect: { id, price?, stockQty?, title?, description?, productType?, tags?, vendor?, compareAtPrice?, barcode?, weightGrams?, variantDraft? }
+      const body = req.body || {};
+      const { id } = body;
+      if (!id) return res.status(400).json({ ok: false, error: "Missing id" });
 
-    // What we mirror immediately in Firestore:
-    const immediatePatch: any = {
-      updatedAt: now,
-    };
-    if (price != null) immediatePatch.price = Number(price);
-    if (quantity != null) immediatePatch.stock = Number(quantity);
+      const ref = adminDb.collection("merchantProducts").doc(id);
+      const snap = await ref.get();
+      if (!snap.exists) return res.status(404).json({ ok: false, error: "Not found" });
+      const doc = snap.data() || {};
 
-    // Everything else becomes "update_in_review" for admin to apply in Shopify
-    const needsReviewPayload: any = {
-      // seller-proposed edits not yet applied on Shopify
-      pendingEdits: {
-        ...(title != null ? { title } : {}),
-        ...(description != null ? { description } : {}),
-        ...(Array.isArray(tags) ? { tags } : {}),
-        ...(images ? { images } : {}),
-        ...(productType !== undefined ? { productType } : {}),
-        ...(vendor !== undefined ? { vendor } : {}),
-        ...(variantDraft ? { variantDraft } : {}),
-        ...(adminNote ? { adminNote } : {}),
-      },
-      // status flag for your admin queue
-      status: "update_in_review",
-      updateRequestedAt: now,
-    };
+      // seller can only touch their own doc
+      if (doc.merchantId && doc.merchantId !== uid) {
+        return res.status(403).json({ ok: false, error: "Forbidden" });
+      }
 
-    // If nothing in pendingEdits, avoid writing empty object
-    const hasPending =
-      Object.keys(needsReviewPayload.pendingEdits).length > 0;
+      const updates: any = { updatedAt: Date.now() };
+      let adminNeedsReview = false;
 
-    await docRef.set(
-      {
-        ...immediatePatch,
-        ...(hasPending ? needsReviewPayload : {}),
-      },
-      { merge: true }
-    );
+      // --- Instant pushes to Shopify (price / stock) ---
+      const shopifyProductId: string | undefined = doc.shopifyProductId;
+      const defaultVariantId: string | undefined = (doc.shopifyVariantIds || [])[0];
 
-    return res.status(200).json({
-      ok: true,
-      productId: shopifyProductId,
-      updatedVariantId: targetVariant?.id || null,
-      inventoryUpdated: quantity != null && !!locationId,
-      note: !locationId && quantity != null
-        ? "Quantity stored locally; no SHOPIFY_LOCATION_ID set."
-        : undefined,
-    });
+      // 1) Price (instant)
+      if (defaultVariantId && body.price != null && body.price !== "") {
+        const updateRes = await shopifyGraphQL(VARIANTS_BULK_UPDATE, {
+          productId: shopifyProductId,
+          variants: [{ id: defaultVariantId, price: String(body.price) }],
+        });
+        const errors = updateRes?.data?.productVariantsBulkUpdate?.userErrors || [];
+        if (errors.length) return res.status(400).json({ ok: false, error: errors.map((e: any) => e.message).join("; ") });
+        updates.price = Number(body.price);
+      }
+
+      // 2) Stock (instant if you set a location)
+      if (body.stockQty != null && body.stockQty !== "") {
+        updates.stock = Number(body.stockQty);
+
+        const locationId = process.env.SHOPIFY_LOCATION_ID;
+        const inventoryItemId: string | undefined = doc.inventoryItemId; // set this in your create flow; else we can’t push absolute qty
+
+        if (locationId && inventoryItemId) {
+          try {
+            const invRes = await shopifyGraphQL(INVENTORY_SET_ON_HAND, {
+              input: {
+                reason: "correction",
+                setQuantities: [{ inventoryItemId, locationId, quantity: Number(body.stockQty) }],
+              },
+            });
+            const invErrors = invRes?.data?.inventorySetOnHandQuantities?.userErrors || [];
+            if (invErrors.length) {
+              // don’t fail the whole request; just log and keep local
+              console.warn("inventorySetOnHandQuantities errors:", invErrors);
+            }
+          } catch (e) {
+            console.warn("inventorySetOnHandQuantities failed:", e);
+          }
+        }
+      }
+
+      // --- Everything else => admin review ---
+      const reviewFields = [
+        "title",
+        "description",
+        "productType",
+        "tags",
+        "vendor",
+        "compareAtPrice",
+        "barcode",
+        "weightGrams",
+        "variantDraft",
+      ] as const;
+
+      const changedForReview: Record<string, any> = {};
+      for (const f of reviewFields) {
+        if (f in body && body[f] !== undefined) {
+          changedForReview[f] = body[f];
+        }
+      }
+      if (Object.keys(changedForReview).length) {
+        adminNeedsReview = true;
+        updates.pendingUpdates = {
+          ...(doc.pendingUpdates || {}),
+          ...changedForReview,
+        };
+        updates.status = "update_in_review";
+      }
+
+      await ref.set(updates, { merge: true });
+
+      return res.status(200).json({
+        ok: true,
+        review: adminNeedsReview,
+        note:
+          adminNeedsReview
+            ? "Price/stock pushed instantly (if provided). Other changes queued for admin review."
+            : "Updated instantly.",
+      });
+    }
+
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
   } catch (e: any) {
-    console.error("update product error:", e?.message || e);
+    console.error("update endpoint error:", e?.message || e);
     return res.status(500).json({ ok: false, error: e?.message || "Internal error" });
   }
 }
