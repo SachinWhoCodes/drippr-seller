@@ -93,6 +93,16 @@ export default function Products() {
   const [products, setProducts] = useState<MerchantProduct[]>([]);
   const [search, setSearch] = useState("");
 
+
+  // --- Bulk upload dialog state ---
+  const [isBulkOpen, setIsBulkOpen] = useState(false);
+  const [bulkFile, setBulkFile] = useState<File | null>(null);
+  const [bulkTotal, setBulkTotal] = useState(0);
+  const [bulkDone, setBulkDone] = useState(0);
+  const [bulkRunning, setBulkRunning] = useState(false);
+  const [bulkErrors, setBulkErrors] = useState<Array<{ row: number; error: string }>>([]);
+
+
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => setUid(u?.uid ?? null));
     return () => unsub();
@@ -566,6 +576,172 @@ export default function Products() {
 
   const handleDeleteProduct = (id: string) => toast.error(`Delete product ${id} (coming soon)`);
 
+
+
+  // Normalize header names ("Product Type" -> "producttype")
+  function norm(s: any) {
+    return String(s ?? "").trim().toLowerCase().replace(/\s+/g, "");
+  }
+  function num(v: any) {
+    const n = Number(String(v).trim());
+    return Number.isFinite(n) ? n : undefined;
+  }
+  function csvToArr(v: any) {
+    return String(v || "")
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean);
+  }
+
+  // cartesian already exists above; reuse it
+
+  // Build variantDraft from Option* columns (values comma-separated)
+  // Example headers we accept: Option1Name, Option1Values, etc. (case-insensitive)
+  function buildVariantDraft(row: any) {
+    const o1n = row["option1name"] || row["option_1_name"];
+    const o1v = row["option1values"] || row["option_1_values"];
+    const o2n = row["option2name"] || row["option_2_name"];
+    const o2v = row["option2values"] || row["option_2_values"];
+    const o3n = row["option3name"] || row["option_3_name"];
+    const o3v = row["option3values"] || row["option_3_values"];
+
+    const options: Array<{ name: string; values: string[] }> = [];
+    if (o1n && o1v) options.push({ name: String(o1n).trim(), values: csvToArr(o1v) });
+    if (o2n && o2v) options.push({ name: String(o2n).trim(), values: csvToArr(o2v) });
+    if (o3n && o3v) options.push({ name: String(o3n).trim(), values: csvToArr(o3v) });
+
+    if (!options.length) return undefined;
+
+    // Make a simple grid; apply base price/qty to each variant unless columns are provided
+    const lists = options.map((o) => o.values);
+    const combos = cartesian(lists);
+    const variants = combos.map((vals) => ({
+      options: vals,
+      title: vals.join(" / "),
+      // Per-row overrides if present:
+      price: num(row["variantprice"]) ?? num(row["price"]),
+      compareAtPrice: num(row["variantcompareat"]) ?? num(row["compareatprice"]) ?? undefined,
+      sku: String(row["variantsku"] ?? "").trim() || undefined,
+      quantity: num(row["variantqty"]) ?? num(row["quantity"]) ?? 0,
+      barcode: String(row["variantbarcode"] ?? "").trim() || undefined,
+      weightGrams: num(row["variantweightgrams"]) ?? num(row["weightgrams"]) ?? undefined,
+    }));
+
+    return { options, variants };
+  }
+
+  // Map one sheet row to your /create payload
+  function rowToCreateBody(row: any) {
+    // Accept generous header variants (case and spaces ignored)
+    const map: Record<string, any> = {};
+    for (const [k, v] of Object.entries(row)) map[norm(k)] = v;
+
+    const title = String(map["title"] ?? "").trim();
+    const description = String(map["description"] ?? "").trim();
+    const price = num(map["price"]);
+    if (!title || price == null) {
+      throw new Error("Missing Title or Price");
+    }
+
+    const compareAtPrice = num(map["compareatprice"]);
+    const cost = num(map["cost"]);
+    const barcode = String(map["barcode"] ?? "").trim() || undefined;
+    const weightGrams = num(map["weightgrams"]);
+    const quantity = num(map["quantity"]) ?? 0;
+
+    const vendor = String(map["vendor"] ?? "").trim() || undefined;
+    const productType = String(map["producttype"] ?? "").trim() || undefined;
+    const tags = csvToArr(map["tags"]);
+    const seoTitle = String(map["seotitle"] ?? "").trim() || undefined;
+    const seoDescription = String(map["seodescription"] ?? "").trim() || undefined;
+
+    // Remote images (optional): ImageURLs (comma separated)
+    const resourceUrls = csvToArr(map["imageurls"]);
+
+    const variantDraft = buildVariantDraft(map);
+
+    return {
+      title,
+      description,
+      price,
+      compareAtPrice,
+      barcode,
+      weightGrams,
+      inventory: {
+        quantity,
+        tracked: true, // default; you can change or read from column TrackInventory=yes/no
+        cost,
+      },
+      currency: "INR",
+      tags,
+      resourceUrls: resourceUrls.length ? resourceUrls : undefined,
+      vendor,
+      productType,
+      status: "active",
+      seo: seoTitle || seoDescription ? { title: seoTitle, description: seoDescription } : undefined,
+      variantDraft,
+    };
+  }
+
+  // Parse first sheet with xlsx
+  async function parseWorkbook(file: File) {
+    const XLSX = (await import("xlsx")).default || (await import("xlsx"));
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, { type: "array" });
+    const sheet = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+    return rows as any[];
+  }
+
+
+  async function runBulkUpload() {
+    if (!bulkFile) {
+      toast.error("Please choose a file");
+      return;
+    }
+    if (!auth.currentUser) {
+      toast.error("Please login again.");
+      return;
+    }
+    setBulkRunning(true);
+    setBulkErrors([]);
+    setBulkDone(0);
+    try {
+      const rows = await parseWorkbook(bulkFile);
+      setBulkTotal(rows.length);
+
+      const idToken = await getIdToken();
+
+      for (let i = 0; i < rows.length; i++) {
+        try {
+          const body = rowToCreateBody(rows[i]);
+          const res = await fetch("/api/admin/products/create", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${idToken}`,
+            },
+            body: JSON.stringify(body),
+          });
+          const j = await res.json().catch(() => ({}));
+          if (!res.ok || !j.ok) throw new Error(j.error || "Create failed");
+        } catch (e: any) {
+          setBulkErrors((prev) => [...prev, { row: i + 2, error: e?.message || "Unknown error" }]); // +2: header row + 1-based
+        } finally {
+          setBulkDone((d) => d + 1);
+        }
+      }
+      toast.success("Bulk upload finished.");
+    } catch (e: any) {
+      console.error(e);
+      toast.error(e?.message || "Bulk upload failed");
+    } finally {
+      setBulkRunning(false);
+    }
+  }
+
+
+
   /** ----- UI ----- */
   return (
     <DashboardLayout>
@@ -778,12 +954,17 @@ export default function Products() {
           </div>
         </div>
 
-        <div className="flex justify-end">
+        <div className="flex justify-end gap-2">
+          <Button variant="secondary" onClick={() => setIsBulkOpen(true)} className="gap-2">
+            <Upload className="h-4 w-4" />
+            Bulk upload
+          </Button>
           <Button onClick={handleAddProduct} className="gap-2">
             <Plus className="h-4 w-4" />
             Add Product
           </Button>
         </div>
+
 
         {/* List */}
         <Card>
@@ -1068,6 +1249,64 @@ export default function Products() {
             )}
           </DialogContent>
         </Dialog>
+
+        <Dialog open={isBulkOpen} onOpenChange={setIsBulkOpen}>
+          <DialogContent className="max-w-2xl">
+            <DialogHeader>
+              <DialogTitle>Bulk Product Upload</DialogTitle>
+            </DialogHeader>
+
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <Label>Upload file (.xlsx or .csv)</Label>
+                <Input
+                  type="file"
+                  accept=".xlsx,.xls,.csv"
+                  onChange={(e) => setBulkFile(e.target.files?.[0] || null)}
+                  disabled={bulkRunning}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Use the provided template. The first sheet’s first row must be headers.
+                </p>
+              </div>
+
+              {/* Progress */}
+              {bulkRunning || bulkDone > 0 ? (
+                <div className="space-y-2">
+                  <div className="flex justify-between text-sm">
+                    <span>Progress</span>
+                    <span>
+                      {bulkDone}/{bulkTotal}
+                    </span>
+                  </div>
+                  <div className="h-2 w-full rounded bg-muted overflow-hidden">
+                    <div
+                      className="h-2 bg-primary transition-all"
+                      style={{ width: bulkTotal ? `${Math.floor((bulkDone / bulkTotal) * 100)}%` : "0%" }}
+                    />
+                  </div>
+                  {!!bulkErrors.length && (
+                    <div className="rounded-md border p-2 max-h-40 overflow-auto text-xs">
+                      {bulkErrors.map((e, i) => (
+                        <div key={i}>Row {e.row}: {e.error}</div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ) : null}
+
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => setIsBulkOpen(false)} disabled={bulkRunning}>
+                  Close
+                </Button>
+                <Button onClick={runBulkUpload} disabled={!bulkFile || bulkRunning}>
+                  {bulkRunning ? "Uploading…" : "Start upload"}
+                </Button>
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
+
       </div>
     </DashboardLayout>
   );
