@@ -25,6 +25,8 @@ import Merchants from "./pages/admin/Merchants";
 import ProductQueue from "./pages/admin/Queue";
 import AdminSettings from "./pages/admin/Settings";
 import AdminSupport from "./pages/admin/Support";
+import MediaBucket from "./pages/MediaBucket";
+import Notifications from "./pages/Notifications";
 
 const queryClient = new QueryClient();
 
@@ -56,6 +58,14 @@ const App = () => (
           <Route path="/dashboard/analytics" element={
             <RequireAuth><Analytics /></RequireAuth>
           } />
+
+          <Route path="/dashboard/media-bucket" element={
+            <RequireAuth><MediaBucket /></RequireAuth>
+            } />
+          <Route path="/dashboard/notifications" element={
+            <RequireAuth><Notifications /></RequireAuth>
+            } />
+
           <Route path="/dashboard/seller-support-ai" element={
             <RequireAuth><SellerSupportAI /></RequireAuth>
           } />

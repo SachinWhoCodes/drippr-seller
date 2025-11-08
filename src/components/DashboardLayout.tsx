@@ -12,6 +12,7 @@ import {
   Bell,
   User,
   LogOut,
+  Image,
   MessageSquare
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -36,6 +37,7 @@ const navigation = [
   { name: "Orders", href: "/dashboard/orders", icon: ShoppingCart },
   { name: "Payments", href: "/dashboard/payments", icon: Wallet },
   { name: "Analytics", href: "/dashboard/analytics", icon: BarChart3 },
+  { name: "Media Bucket", href: "/dashboard/media-bucket", icon: Image },
   { name: "Seller Support AI", href: "/dashboard/seller-support-ai", icon: MessageSquare },
   { name: "Support", href: "/dashboard/support", icon: HelpCircle },
   { name: "Settings", href: "/dashboard/settings", icon: Settings },
@@ -110,10 +112,12 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
           </div>
 
           <div className="flex items-center gap-2">
-            <Button variant="ghost" size="icon" className="relative">
-              <Bell className="h-5 w-5" />
-              <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-accent" />
-            </Button>
+            <Link to="/dashboard/notifications">
+              <Button variant="ghost" size="icon" className="relative">
+                <Bell className="h-5 w-5" />
+                <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-accent" />
+              </Button>
+            </Link>
 
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
