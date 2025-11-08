@@ -47,6 +47,7 @@
     "embla-carousel-react": "^8.6.0",
     "firebase": "^12.3.0",
     "firebase-admin": "^13.5.0",
+    "imagekit": "^6.0.0",
     "input-otp": "^1.4.2",
     "lucide-react": "^0.462.0",
     "nanoid": "^5.1.6",
