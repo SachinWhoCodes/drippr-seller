@@ -119,26 +119,31 @@ export default function MediaBucket() {
   useEffect(() => {
     if (!uid) return;
     setLoadingList(true);
+
     const qy = query(
       collection(db, "merchantMedia"),
       where("merchantId", "==", uid),
-      orderBy("createdAt", "desc"),
+      // you can add orderBy("createdAt", "desc") later once index exists
       limit(200)
     );
+
     const unsub = onSnapshot(
       qy,
       (snap) => {
         const rows: MediaDoc[] = [];
-        snap.forEach((d) =>
-          rows.push({ id: d.id, ...(d.data() as any) })
-        );
+        snap.forEach((d) => rows.push({ id: d.id, ...(d.data() as any) }));
         setImages(rows);
         setLoadingList(false);
       },
-      () => setLoadingList(false)
+      (error) => {
+        console.error("merchantMedia snapshot error:", error);
+        setLoadingList(false);
+      }
     );
+
     return () => unsub();
   }, [uid]);
+
 
   const addFiles = (files: File[]) => {
     const items = files
