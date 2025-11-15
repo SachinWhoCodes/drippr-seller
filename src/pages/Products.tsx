@@ -989,7 +989,7 @@ export default function Products() {
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">
-                  If variants are provided, the server will keep the Shopify product in <b>Draft</b> and mark it <b>In review</b>.
+                  If variants are provided, DRIPPR will keep the product in <b>Draft</b> and mark it <b>In review</b>.
                 </p>
               </div>
 
@@ -1299,7 +1299,7 @@ export default function Products() {
                     </div>
                   )}
                   <p className="text-xs text-muted-foreground mt-2">
-                    Editing price/stock above updates Shopify instantly. Removing variants and any other changes go to admin for review.
+                    Editing price/stock above updates Store instantly. Removing variants and any other changes go to admin for review.
                   </p>
                 </div>
 
