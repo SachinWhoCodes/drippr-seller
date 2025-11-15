@@ -1586,7 +1586,7 @@ function VariantPlanner(props: {
             </table>
           </div>
           <p className="text-xs text-muted-foreground">
-            These are <b>proposed additions</b>. Admin will create real Shopify variants based on this plan.
+            These are <b>proposed additions</b>. Drippr will review it.
           </p>
         </div>
       )}
