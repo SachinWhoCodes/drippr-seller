@@ -21,7 +21,7 @@ import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged } from "firebase/auth";
 import { collection, onSnapshot, orderBy, query, where } from "firebase/firestore";
 
-/** ---------------- Types ---------------- */
+/* ---------------- Types ---------------- */
 type StagedTarget = {
   url: string;
   resourceUrl: string;
@@ -68,6 +68,7 @@ type ExistingVariant = {
   weightGrams?: number;
 };
 
+/* ---------------- Utils ---------------- */
 function cartesian<T>(arrs: T[][]): T[][] {
   if (arrs.length === 0) return [];
   return arrs.reduce<T[][]>(
@@ -76,9 +77,9 @@ function cartesian<T>(arrs: T[][]): T[][] {
   );
 }
 
-/** --------------- Component --------------- */
+/* --------------- Component --------------- */
 export default function Products() {
-  // ----- add form state -----
+  /* ----- add form state ----- */
   const [isAddProductOpen, setIsAddProductOpen] = useState(false);
   const [selectedImages, setSelectedImages] = useState<File[]>([]);
   const [imagePreviews, setImagePreviews] = useState<string[]>([]);
@@ -88,20 +89,18 @@ export default function Products() {
   const [trackInventory, setTrackInventory] = useState<"yes" | "no">("yes");
   const [statusSel, setStatusSel] = useState<"active" | "draft">("active");
 
-  // ----- list / search -----
+  /* ----- list / search ----- */
   const [uid, setUid] = useState<string | null>(auth.currentUser?.uid ?? null);
   const [products, setProducts] = useState<MerchantProduct[]>([]);
   const [search, setSearch] = useState("");
 
-
-  // --- Bulk upload dialog state ---
+  /* --- Bulk upload dialog state --- */
   const [isBulkOpen, setIsBulkOpen] = useState(false);
   const [bulkFile, setBulkFile] = useState<File | null>(null);
   const [bulkTotal, setBulkTotal] = useState(0);
   const [bulkDone, setBulkDone] = useState(0);
   const [bulkRunning, setBulkRunning] = useState(false);
   const [bulkErrors, setBulkErrors] = useState<Array<{ row: number; error: string }>>([]);
-
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => setUid(u?.uid ?? null));
@@ -242,6 +241,7 @@ export default function Products() {
     return auth.currentUser.getIdToken();
   }
 
+  /* ===== Create flow: stage + upload to Shopify (new product) ===== */
   async function startStagedUploads(idToken: string, files: File[]) {
     const payload = {
       files: files.map((f) => ({
@@ -406,6 +406,11 @@ export default function Products() {
   const [removeVariantIds, setRemoveVariantIds] = useState<Record<string, boolean>>({});
   const [variantQuickEdits, setVariantQuickEdits] = useState<Record<string, { price?: number | ''; quantity?: number | '' }>>({}); // keyed by variant.id
 
+  // NEW: images editing state (live images)
+  const [editImages, setEditImages] = useState<string[]>([]);
+  const [imagesToRemove, setImagesToRemove] = useState<Record<string, boolean>>({});
+  const [newEditFiles, setNewEditFiles] = useState<File[]>([]);
+
   function markRemove(vid: string, checked: boolean) {
     setRemoveVariantIds(prev => ({ ...prev, [vid]: checked }));
   }
@@ -417,36 +422,42 @@ export default function Products() {
     }));
   }
 
+  // --- details fetch (POST op: "details") ---
   async function fetchDetails(productId: string) {
     setLoadingDetails(true);
     try {
       const idToken = await getIdToken();
-      const r = await fetch(`/api/admin/products/update?id=${productId}&live=1`, {
-        headers: { Authorization: `Bearer ${idToken}` },
+      const r = await fetch(`/api/admin/products/update`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
+        body: JSON.stringify({ op: "details", id: productId }),
       });
       const j = await r.json();
       if (!r.ok || !j.ok) throw new Error(j.error || "Failed to load product details");
 
-      // Live variants come from Shopify via the API response
-      const live = Array.isArray(j.liveVariants) ? j.liveVariants : [];
+      const variants: ExistingVariant[] = Array.isArray(j.product?.variants)
+        ? j.product.variants.map((v: any) => ({
+            id: v.id,
+            title: v.title || "",
+            optionValues: Array.isArray(v.optionValues) ? v.optionValues : (v.title ? String(v.title).split(" / ") : []),
+            price: v.price != null ? Number(v.price) : undefined,
+            quantity: v.quantity != null ? Number(v.quantity) : undefined,
+            sku: v.sku || undefined,
+            barcode: v.barcode || undefined,
+            weightGrams: v.weightGrams != null ? Number(v.weightGrams) : undefined,
+          }))
+        : [];
 
-      // Map to our ExistingVariant shape; optionValues may not be present, derive from title
-      const variants: ExistingVariant[] = live.map((v: any) => ({
-        id: v.id,
-        title: v.title || "",
-        optionValues: Array.isArray(v.optionValues) ? v.optionValues : (v.title ? String(v.title).split(" / ") : []),
-        price: v.price != null ? Number(v.price) : undefined,
-        quantity: v.inventoryQuantity != null ? Number(v.inventoryQuantity) : undefined,
-        sku: v.sku || undefined,
-        barcode: v.barcode || undefined,
-        weightGrams: v.weightGrams != null ? Number(v.weightGrams) : undefined,
-      }));
-
-      // We don’t rely on productOptions here; planner is for *new* variants
       setExistingVariants(variants);
       setRemoveVariantIds({});
       setVariantQuickEdits({});
-      // reset planner for additions only
+
+      const liveImages: string[] = Array.isArray(j.product?.imagesLive) ? j.product.imagesLive : [];
+      setEditImages(liveImages);
+      setImagesToRemove({});
+      setNewEditFiles([]);
+
+      // planner defaults until explicit changes
       setOptions([{ name: "Size", values: [] }, { name: "Color", values: [] }]);
       setValueInputs(["", "", ""]);
       setVariantRows({});
@@ -456,9 +467,6 @@ export default function Products() {
       setLoadingDetails(false);
     }
   }
-
-
-
 
   function openEdit(p: MerchantProduct) {
     setEditing(p);
@@ -477,9 +485,86 @@ export default function Products() {
     setValueInputs(["", "", ""]);
     setVariantRows({});
     setIsEditOpen(true);
-    fetchDetails(p.id); // fetch variants/options
+    fetchDetails(p.id); // fetch variants/options/images
   }
 
+  /* ---------- Image editing helpers (Edit dialog) ---------- */
+
+  function toggleRemoveUrl(url: string, on: boolean) {
+    setImagesToRemove(prev => ({ ...prev, [url]: on }));
+  }
+
+  async function stageForShopify(files: File[]) {
+    const idToken = await getIdToken();
+    const payload = {
+      files: files.map(f => ({ filename: f.name, mimeType: f.type || "image/jpeg", fileSize: f.size })),
+    };
+    const r = await fetch("/api/admin/products/update", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
+      body: JSON.stringify({ op: "imagesStage", ...payload }),
+    });
+    const j = await r.json();
+    if (!r.ok || !j.ok) throw new Error(j.error || "stagedUploadsCreate failed");
+    return j.targets as StagedTarget[];
+  }
+
+  async function uploadToTarget(target: StagedTarget, file: File) {
+    const form = new FormData();
+    for (const p of target.parameters) form.append(p.name, p.value);
+    form.append("file", file);
+    const r = await fetch(target.url, { method: "POST", body: form });
+    if (!r.ok) throw new Error(`Upload failed (${r.status})`);
+    return target.resourceUrl as string;
+  }
+
+  async function attachNewImages() {
+    if (!editing || newEditFiles.length === 0) return;
+    try {
+      const idToken = await getIdToken();
+      const targets = await stageForShopify(newEditFiles);
+      const resourceUrls: string[] = [];
+      for (let i = 0; i < newEditFiles.length; i++) {
+        const u = await uploadToTarget(targets[i], newEditFiles[i]);
+        resourceUrls.push(u);
+      }
+      const r = await fetch("/api/admin/products/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
+        body: JSON.stringify({ op: "imagesAttach", id: editing.id, resourceUrls }),
+      });
+      const j = await r.json();
+      if (!r.ok || !j.ok) throw new Error(j.error || "Attach failed");
+      setEditImages(j.images || []);
+      setNewEditFiles([]);
+      toast.success("Images added");
+    } catch (e: any) {
+      toast.error(e?.message || "Failed to add images");
+    }
+  }
+
+  async function removeSelectedImages() {
+    if (!editing) return;
+    const urls = Object.entries(imagesToRemove).filter(([, on]) => on).map(([u]) => u);
+    if (!urls.length) return toast.error("Select at least one image to remove");
+    try {
+      const idToken = await getIdToken();
+      const r = await fetch("/api/admin/products/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
+        body: JSON.stringify({ op: "imagesDelete", id: editing.id, urls }),
+      });
+      const j = await r.json();
+      if (!r.ok || !j.ok) throw new Error(j.error || "Delete failed");
+      setEditImages(j.images || []);
+      setImagesToRemove({});
+      toast.success("Images removed");
+    } catch (e: any) {
+      toast.error(e?.message || "Failed to remove images");
+    }
+  }
+
+  /* ---------- Submit edit (price/stock live + review fields) ---------- */
   const handleEditProduct = (id: string) => {
     const p = products.find(x => x.id === id);
     if (!p) return toast.error("Product not found");
@@ -573,12 +658,9 @@ export default function Products() {
     }
   };
 
-
   const handleDeleteProduct = (id: string) => toast.error(`Delete product ${id} (coming soon)`);
 
-
-
-  // Normalize header names ("Product Type" -> "producttype")
+  /* ---------- Bulk helpers ---------- */
   function norm(s: any) {
     return String(s ?? "").trim().toLowerCase().replace(/\s+/g, "");
   }
@@ -593,10 +675,6 @@ export default function Products() {
       .filter(Boolean);
   }
 
-  // cartesian already exists above; reuse it
-
-  // Build variantDraft from Option* columns (values comma-separated)
-  // Example headers we accept: Option1Name, Option1Values, etc. (case-insensitive)
   function buildVariantDraft(row: any) {
     const o1n = row["option1name"] || row["option_1_name"];
     const o1v = row["option1values"] || row["option_1_values"];
@@ -612,13 +690,11 @@ export default function Products() {
 
     if (!options.length) return undefined;
 
-    // Make a simple grid; apply base price/qty to each variant unless columns are provided
     const lists = options.map((o) => o.values);
     const combos = cartesian(lists);
     const variants = combos.map((vals) => ({
       options: vals,
       title: vals.join(" / "),
-      // Per-row overrides if present:
       price: num(row["variantprice"]) ?? num(row["price"]),
       compareAtPrice: num(row["variantcompareat"]) ?? num(row["compareatprice"]) ?? undefined,
       sku: String(row["variantsku"] ?? "").trim() || undefined,
@@ -630,9 +706,7 @@ export default function Products() {
     return { options, variants };
   }
 
-  // Map one sheet row to your /create payload
   function rowToCreateBody(row: any) {
-    // Accept generous header variants (case and spaces ignored)
     const map: Record<string, any> = {};
     for (const [k, v] of Object.entries(row)) map[norm(k)] = v;
 
@@ -655,9 +729,7 @@ export default function Products() {
     const seoTitle = String(map["seotitle"] ?? "").trim() || undefined;
     const seoDescription = String(map["seodescription"] ?? "").trim() || undefined;
 
-    // Remote images (optional): ImageURLs (comma separated)
     const resourceUrls = csvToArr(map["imageurls"]);
-
     const variantDraft = buildVariantDraft(map);
 
     return {
@@ -669,7 +741,7 @@ export default function Products() {
       weightGrams,
       inventory: {
         quantity,
-        tracked: true, // default; you can change or read from column TrackInventory=yes/no
+        tracked: true,
         cost,
       },
       currency: "INR",
@@ -683,7 +755,6 @@ export default function Products() {
     };
   }
 
-  // Parse first sheet with xlsx
   async function parseWorkbook(file: File) {
     const XLSX = (await import("xlsx")).default || (await import("xlsx"));
     const buf = await file.arrayBuffer();
@@ -692,7 +763,6 @@ export default function Products() {
     const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
     return rows as any[];
   }
-
 
   async function runBulkUpload() {
     if (!bulkFile) {
@@ -726,7 +796,7 @@ export default function Products() {
           const j = await res.json().catch(() => ({}));
           if (!res.ok || !j.ok) throw new Error(j.error || "Create failed");
         } catch (e: any) {
-          setBulkErrors((prev) => [...prev, { row: i + 2, error: e?.message || "Unknown error" }]); // +2: header row + 1-based
+          setBulkErrors((prev) => [...prev, { row: i + 2, error: e?.message || "Unknown error" }]);
         } finally {
           setBulkDone((d) => d + 1);
         }
@@ -740,9 +810,7 @@ export default function Products() {
     }
   }
 
-
-
-  /** ----- UI ----- */
+  /* ----- UI ----- */
   return (
     <DashboardLayout>
       <div className="space-y-6">
@@ -965,7 +1033,6 @@ export default function Products() {
           </Button>
         </div>
 
-
         {/* List */}
         <Card>
           <CardHeader>
@@ -1112,42 +1179,57 @@ export default function Products() {
                   </div>
                 </div>
 
-                {/* Other review fields */}
-                <div className="grid grid-cols-3 gap-4">
-                  <div className="space-y-2">
-                    <Label>Compare at (₹)</Label>
-                    <Input
-                      type="number"
-                      min={0}
-                      step={0.01}
-                      value={eCompareAt}
-                      onChange={(e) => setECompareAt(e.target.value === "" ? "" : Number(e.target.value))}
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Barcode</Label>
-                    <Input value={eBarcode} onChange={(e) => setEBarcode(e.target.value)} />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Weight (grams)</Label>
-                    <Input
-                      type="number"
-                      min={0}
-                      value={eWeight}
-                      onChange={(e) => setEWeight(e.target.value === "" ? "" : Number(e.target.value))}
-                    />
-                  </div>
-                </div>
+                {/* --- Images (live) --- */}
+                <div className="border-t pt-4">
+                  <h3 className="font-semibold mb-2">Product Images</h3>
 
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <Label>Vendor</Label>
-                    <Input value={eVendor} onChange={(e) => setEVendor(e.target.value)} />
+                  {editImages.length === 0 ? (
+                    <div className="text-sm text-muted-foreground mb-3">No images on this product.</div>
+                  ) : (
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+                      {editImages.map((u) => (
+                        <label key={u} className="block border rounded-md overflow-hidden cursor-pointer">
+                          <img src={u} alt="" className="w-full h-32 object-cover" />
+                          <div className="flex items-center gap-2 p-2 text-xs">
+                            <input
+                              type="checkbox"
+                              checked={!!imagesToRemove[u]}
+                              onChange={(e) => toggleRemoveUrl(u, e.target.checked)}
+                            />
+                            <span className="truncate" title={u}>Remove</span>
+                          </div>
+                        </label>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="flex flex-col sm:flex-row sm:items-center gap-2 mb-2">
+                    <input
+                      type="file"
+                      accept="image/*"
+                      multiple
+                      onChange={(e) => setNewEditFiles(Array.from(e.target.files || []))}
+                    />
+                    <div className="flex gap-2">
+                      <Button type="button" onClick={attachNewImages} disabled={!newEditFiles.length}>
+                        Add selected images
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="destructive"
+                        onClick={removeSelectedImages}
+                        disabled={!Object.values(imagesToRemove).some(Boolean)}
+                      >
+                        Remove selected
+                      </Button>
+                    </div>
                   </div>
-                  <div className="space-y-2">
-                    <Label>Tags (comma-separated)</Label>
-                    <Input value={eTags} onChange={(e) => setETags(e.target.value)} />
-                  </div>
+
+                  {(newEditFiles.length > 0) && (
+                    <div className="text-xs text-muted-foreground">
+                      {newEditFiles.length} file(s) ready to upload
+                    </div>
+                  )}
                 </div>
 
                 {/* Existing variants (live) */}
@@ -1266,7 +1348,7 @@ export default function Products() {
                   disabled={bulkRunning}
                 />
                 <p className="text-xs text-muted-foreground">
-                  Use the provided template. The first sheet’s first row must be headers.
+                  Use the provided template <a className="text-blue-500" href="#">[Download Template]</a>. The first sheet’s first row must be headers.
                 </p>
               </div>
 
