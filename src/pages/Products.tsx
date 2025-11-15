@@ -21,7 +21,7 @@ import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged } from "firebase/auth";
 import { collection, onSnapshot, orderBy, query, where } from "firebase/firestore";
 
-/* ---------------- Types ---------------- */
+/** ---------------- Types ---------------- */
 type StagedTarget = {
   url: string;
   resourceUrl: string;
@@ -68,7 +68,6 @@ type ExistingVariant = {
   weightGrams?: number;
 };
 
-/* ---------------- Utils ---------------- */
 function cartesian<T>(arrs: T[][]): T[][] {
   if (arrs.length === 0) return [];
   return arrs.reduce<T[][]>(
@@ -77,9 +76,9 @@ function cartesian<T>(arrs: T[][]): T[][] {
   );
 }
 
-/* --------------- Component --------------- */
+/** --------------- Component --------------- */
 export default function Products() {
-  /* ----- add form state ----- */
+  // ----- add form state -----
   const [isAddProductOpen, setIsAddProductOpen] = useState(false);
   const [selectedImages, setSelectedImages] = useState<File[]>([]);
   const [imagePreviews, setImagePreviews] = useState<string[]>([]);
@@ -89,12 +88,12 @@ export default function Products() {
   const [trackInventory, setTrackInventory] = useState<"yes" | "no">("yes");
   const [statusSel, setStatusSel] = useState<"active" | "draft">("active");
 
-  /* ----- list / search ----- */
+  // ----- list / search -----
   const [uid, setUid] = useState<string | null>(auth.currentUser?.uid ?? null);
   const [products, setProducts] = useState<MerchantProduct[]>([]);
   const [search, setSearch] = useState("");
 
-  /* --- Bulk upload dialog state --- */
+  // --- Bulk upload dialog state ---
   const [isBulkOpen, setIsBulkOpen] = useState(false);
   const [bulkFile, setBulkFile] = useState<File | null>(null);
   const [bulkTotal, setBulkTotal] = useState(0);
@@ -241,7 +240,6 @@ export default function Products() {
     return auth.currentUser.getIdToken();
   }
 
-  /* ===== Create flow: stage + upload to Shopify (new product) ===== */
   async function startStagedUploads(idToken: string, files: File[]) {
     const payload = {
       files: files.map((f) => ({
@@ -406,10 +404,11 @@ export default function Products() {
   const [removeVariantIds, setRemoveVariantIds] = useState<Record<string, boolean>>({});
   const [variantQuickEdits, setVariantQuickEdits] = useState<Record<string, { price?: number | ''; quantity?: number | '' }>>({}); // keyed by variant.id
 
-  // NEW: images editing state (live images)
-  const [editImages, setEditImages] = useState<string[]>([]);
-  const [imagesToRemove, setImagesToRemove] = useState<Record<string, boolean>>({});
-  const [newEditFiles, setNewEditFiles] = useState<File[]>([]);
+  // ---- NEW (edit images) ----
+  const [editImageFiles, setEditImageFiles] = useState<File[]>([]);
+  const [editImagesLive, setEditImagesLive] = useState<string[]>([]);
+  const [editSelectedDelete, setEditSelectedDelete] = useState<Record<string, boolean>>({});
+  const [editImgBusy, setEditImgBusy] = useState(false);
 
   function markRemove(vid: string, checked: boolean) {
     setRemoveVariantIds(prev => ({ ...prev, [vid]: checked }));
@@ -422,21 +421,20 @@ export default function Products() {
     }));
   }
 
-  // --- details fetch (POST op: "details") ---
   async function fetchDetails(productId: string) {
     setLoadingDetails(true);
     try {
       const idToken = await getIdToken();
-      const r = await fetch(`/api/admin/products/update`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
-        body: JSON.stringify({ op: "details", id: productId }),
+      const r = await fetch(`/api/admin/products/update?id=${productId}&live=1`, {
+        headers: { Authorization: `Bearer ${idToken}` },
       });
       const j = await r.json();
       if (!r.ok || !j.ok) throw new Error(j.error || "Failed to load product details");
 
-      const variants: ExistingVariant[] = Array.isArray(j.product?.variants)
-        ? j.product.variants.map((v: any) => ({
+      // ***** FIXED: read from j.product.variants & j.product.imagesLive *****
+      const p = j.product || {};
+      const variantsLive: ExistingVariant[] = Array.isArray(p.variants)
+        ? p.variants.map((v: any) => ({
             id: v.id,
             title: v.title || "",
             optionValues: Array.isArray(v.optionValues) ? v.optionValues : (v.title ? String(v.title).split(" / ") : []),
@@ -448,16 +446,14 @@ export default function Products() {
           }))
         : [];
 
-      setExistingVariants(variants);
+      setExistingVariants(variantsLive);
       setRemoveVariantIds({});
       setVariantQuickEdits({});
+      setEditImagesLive(Array.isArray(p.imagesLive) ? p.imagesLive : []);
+      setEditSelectedDelete({});
+      setEditImageFiles([]);
 
-      const liveImages: string[] = Array.isArray(j.product?.imagesLive) ? j.product.imagesLive : [];
-      setEditImages(liveImages);
-      setImagesToRemove({});
-      setNewEditFiles([]);
-
-      // planner defaults until explicit changes
+      // reset planner for additions only
       setOptions([{ name: "Size", values: [] }, { name: "Color", values: [] }]);
       setValueInputs(["", "", ""]);
       setVariantRows({});
@@ -484,87 +480,13 @@ export default function Products() {
     setOptions([{ name: "Size", values: [] }, { name: "Color", values: [] }]);
     setValueInputs(["", "", ""]);
     setVariantRows({});
+    setEditImagesLive(p.images || []);
+    setEditSelectedDelete({});
+    setEditImageFiles([]);
     setIsEditOpen(true);
-    fetchDetails(p.id); // fetch variants/options/images
+    fetchDetails(p.id); // fetch variants/images
   }
 
-  /* ---------- Image editing helpers (Edit dialog) ---------- */
-
-  function toggleRemoveUrl(url: string, on: boolean) {
-    setImagesToRemove(prev => ({ ...prev, [url]: on }));
-  }
-
-  async function stageForShopify(files: File[]) {
-    const idToken = await getIdToken();
-    const payload = {
-      files: files.map(f => ({ filename: f.name, mimeType: f.type || "image/jpeg", fileSize: f.size })),
-    };
-    const r = await fetch("/api/admin/products/update", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
-      body: JSON.stringify({ op: "imagesStage", ...payload }),
-    });
-    const j = await r.json();
-    if (!r.ok || !j.ok) throw new Error(j.error || "stagedUploadsCreate failed");
-    return j.targets as StagedTarget[];
-  }
-
-  async function uploadToTarget(target: StagedTarget, file: File) {
-    const form = new FormData();
-    for (const p of target.parameters) form.append(p.name, p.value);
-    form.append("file", file);
-    const r = await fetch(target.url, { method: "POST", body: form });
-    if (!r.ok) throw new Error(`Upload failed (${r.status})`);
-    return target.resourceUrl as string;
-  }
-
-  async function attachNewImages() {
-    if (!editing || newEditFiles.length === 0) return;
-    try {
-      const idToken = await getIdToken();
-      const targets = await stageForShopify(newEditFiles);
-      const resourceUrls: string[] = [];
-      for (let i = 0; i < newEditFiles.length; i++) {
-        const u = await uploadToTarget(targets[i], newEditFiles[i]);
-        resourceUrls.push(u);
-      }
-      const r = await fetch("/api/admin/products/update", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
-        body: JSON.stringify({ op: "imagesAttach", id: editing.id, resourceUrls }),
-      });
-      const j = await r.json();
-      if (!r.ok || !j.ok) throw new Error(j.error || "Attach failed");
-      setEditImages(j.images || []);
-      setNewEditFiles([]);
-      toast.success("Images added");
-    } catch (e: any) {
-      toast.error(e?.message || "Failed to add images");
-    }
-  }
-
-  async function removeSelectedImages() {
-    if (!editing) return;
-    const urls = Object.entries(imagesToRemove).filter(([, on]) => on).map(([u]) => u);
-    if (!urls.length) return toast.error("Select at least one image to remove");
-    try {
-      const idToken = await getIdToken();
-      const r = await fetch("/api/admin/products/update", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
-        body: JSON.stringify({ op: "imagesDelete", id: editing.id, urls }),
-      });
-      const j = await r.json();
-      if (!r.ok || !j.ok) throw new Error(j.error || "Delete failed");
-      setEditImages(j.images || []);
-      setImagesToRemove({});
-      toast.success("Images removed");
-    } catch (e: any) {
-      toast.error(e?.message || "Failed to remove images");
-    }
-  }
-
-  /* ---------- Submit edit (price/stock live + review fields) ---------- */
   const handleEditProduct = (id: string) => {
     const p = products.find(x => x.id === id);
     if (!p) return toast.error("Product not found");
@@ -660,7 +582,7 @@ export default function Products() {
 
   const handleDeleteProduct = (id: string) => toast.error(`Delete product ${id} (coming soon)`);
 
-  /* ---------- Bulk helpers ---------- */
+  // Normalize header names ("Product Type" -> "producttype")
   function norm(s: any) {
     return String(s ?? "").trim().toLowerCase().replace(/\s+/g, "");
   }
@@ -675,6 +597,7 @@ export default function Products() {
       .filter(Boolean);
   }
 
+  // Build variantDraft from Option* columns (values comma-separated)
   function buildVariantDraft(row: any) {
     const o1n = row["option1name"] || row["option_1_name"];
     const o1v = row["option1values"] || row["option_1_values"];
@@ -810,7 +733,99 @@ export default function Products() {
     }
   }
 
-  /* ----- UI ----- */
+  /** ====== EDIT: images section handlers ====== */
+  function handleEditImageSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files || []);
+    setEditImageFiles(files);
+  }
+
+  async function handleEditAddSelectedImages() {
+    if (!editing) return;
+    if (!editImageFiles.length) {
+      toast.error("Please choose image files first.");
+      return;
+    }
+    setEditImgBusy(true);
+    try {
+      const idToken = await getIdToken();
+
+      // Stage targets (via update.ts op=imagesStage)
+      const stageRes = await fetch("/api/admin/products/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
+        body: JSON.stringify({
+          op: "imagesStage",
+          files: editImageFiles.map((f) => ({
+            filename: f.name,
+            mimeType: f.type || "image/jpeg",
+            fileSize: f.size,
+          })),
+        }),
+      });
+      const stageJson = await stageRes.json();
+      if (!stageRes.ok || !stageJson.ok) throw new Error(stageJson.error || "Failed to stage images");
+      const targets: StagedTarget[] = stageJson.targets || [];
+      if (!targets.length || targets.length !== editImageFiles.length) {
+        throw new Error("Staging target count mismatch");
+      }
+
+      // Upload files to staged targets
+      const resourceUrls: string[] = [];
+      for (let i = 0; i < editImageFiles.length; i++) {
+        const url = await uploadFileToShopify(targets[i], editImageFiles[i]);
+        resourceUrls.push(url);
+      }
+
+      // Attach to Shopify + mirror in Firestore (via update.ts op=imagesAttach)
+      const attachRes = await fetch("/api/admin/products/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
+        body: JSON.stringify({ op: "imagesAttach", id: editing.id, resourceUrls }),
+      });
+      const attachJson = await attachRes.json();
+      if (!attachRes.ok || !attachJson.ok) throw new Error(attachJson.error || "Failed to attach images");
+
+      toast.success("Images added.");
+      setEditImageFiles([]);
+      // refresh details to reflect latest images
+      await fetchDetails(editing.id);
+    } catch (e: any) {
+      console.error(e);
+      toast.error(e?.message || "Failed to add images");
+    } finally {
+      setEditImgBusy(false);
+    }
+  }
+
+  async function handleEditRemoveSelectedImages() {
+    if (!editing) return;
+    const urls = Object.entries(editSelectedDelete).filter(([, v]) => v).map(([k]) => k);
+    if (!urls.length) {
+      toast.error("Select images to remove.");
+      return;
+    }
+    setEditImgBusy(true);
+    try {
+      const idToken = await getIdToken();
+      const delRes = await fetch("/api/admin/products/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
+        body: JSON.stringify({ op: "imagesDelete", id: editing.id, urls }),
+      });
+      const delJson = await delRes.json();
+      if (!delRes.ok || !delJson.ok) throw new Error(delJson.error || "Failed to delete images");
+      toast.success("Selected images removed.");
+      setEditSelectedDelete({});
+      await fetchDetails(editing.id);
+    } catch (e: any) {
+      console.error(e);
+      toast.error(e?.message || "Failed to remove images");
+    } finally {
+      setEditImgBusy(false);
+    }
+  }
+
+  /** ----- UI ----- */
   return (
     <DashboardLayout>
       <div className="space-y-6">
@@ -938,11 +953,6 @@ export default function Products() {
                 </div>
               </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="tags">Tags (comma-separated)</Label>
-                <Input id="tags" name="tags" placeholder="casual, cotton, comfortable" />
-              </div>
-
               {/* ===== Variants (plan for Admin) ===== */}
               <VariantPlanner
                 options={options}
@@ -989,7 +999,7 @@ export default function Products() {
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">
-                  If variants are provided, DRIPPR will keep the product in <b>Draft</b> and mark it <b>In review</b>.
+                  If variants are provided, the server will keep the Shopify product in <b>Draft</b> and mark it <b>In review</b>.
                 </p>
               </div>
 
@@ -1179,57 +1189,63 @@ export default function Products() {
                   </div>
                 </div>
 
-                {/* --- Images (live) --- */}
+                {/* ----- Product Images (EDIT) ----- */}
                 <div className="border-t pt-4">
                   <h3 className="font-semibold mb-2">Product Images</h3>
 
-                  {editImages.length === 0 ? (
-                    <div className="text-sm text-muted-foreground mb-3">No images on this product.</div>
+                  {editImagesLive.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">No images on this product.</p>
                   ) : (
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
-                      {editImages.map((u) => (
-                        <label key={u} className="block border rounded-md overflow-hidden cursor-pointer">
-                          <img src={u} alt="" className="w-full h-32 object-cover" />
-                          <div className="flex items-center gap-2 p-2 text-xs">
-                            <input
-                              type="checkbox"
-                              checked={!!imagesToRemove[u]}
-                              onChange={(e) => toggleRemoveUrl(u, e.target.checked)}
-                            />
-                            <span className="truncate" title={u}>Remove</span>
-                          </div>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+                      {editImagesLive.map((u) => (
+                        <label key={u} className="relative block">
+                          <img src={u} alt="img" className="w-full h-28 object-cover rounded-md border" />
+                          <input
+                            type="checkbox"
+                            className="absolute top-2 left-2 h-4 w-4"
+                            checked={!!editSelectedDelete[u]}
+                            onChange={(e) =>
+                              setEditSelectedDelete((prev) => ({ ...prev, [u]: e.target.checked }))
+                            }
+                          />
                         </label>
                       ))}
                     </div>
                   )}
 
-                  <div className="flex flex-col sm:flex-row sm:items-center gap-2 mb-2">
-                    <input
+                  <div className="flex flex-col sm:flex-row gap-2 items-start sm:items-center">
+                    <Input
                       type="file"
                       accept="image/*"
                       multiple
-                      onChange={(e) => setNewEditFiles(Array.from(e.target.files || []))}
+                      onChange={handleEditImageSelect}
+                      disabled={editImgBusy}
+                      className="w-auto"
                     />
-                    <div className="flex gap-2">
-                      <Button type="button" onClick={attachNewImages} disabled={!newEditFiles.length}>
-                        Add selected images
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="destructive"
-                        onClick={removeSelectedImages}
-                        disabled={!Object.values(imagesToRemove).some(Boolean)}
-                      >
-                        Remove selected
-                      </Button>
+                    <div className="text-xs text-muted-foreground">
+                      {editImageFiles.length
+                        ? `${editImageFiles.length} file(s) ready to upload`
+                        : " "}
                     </div>
                   </div>
 
-                  {(newEditFiles.length > 0) && (
-                    <div className="text-xs text-muted-foreground">
-                      {newEditFiles.length} file(s) ready to upload
-                    </div>
-                  )}
+                  <div className="flex gap-2 mt-3">
+                    <Button
+                      type="button"
+                      onClick={handleEditAddSelectedImages}
+                      disabled={editImgBusy || !editImageFiles.length}
+                    >
+                      {editImgBusy ? "Working…" : "Add selected images"}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      onClick={handleEditRemoveSelectedImages}
+                      disabled={editImgBusy || !Object.values(editSelectedDelete).some(Boolean)}
+                    >
+                      Remove selected
+                    </Button>
+                  </div>
                 </div>
 
                 {/* Existing variants (live) */}
@@ -1299,7 +1315,7 @@ export default function Products() {
                     </div>
                   )}
                   <p className="text-xs text-muted-foreground mt-2">
-                    Editing price/stock above updates Store instantly. Removing variants and any other changes go to admin for review.
+                    Editing price/stock above updates Shopify instantly. Removing variants and any other changes go to admin for review.
                   </p>
                 </div>
 
@@ -1348,12 +1364,12 @@ export default function Products() {
                   disabled={bulkRunning}
                 />
                 <p className="text-xs text-muted-foreground">
-                  Use the provided template <a className="text-blue-500" href="#">[Download Template]</a>. The first sheet’s first row must be headers.
+                  Use the provided template. The first sheet’s first row must be headers.
                 </p>
               </div>
 
               {/* Progress */}
-              {bulkRunning || bulkDone > 0 ? (
+              {(bulkRunning || bulkDone > 0) && (
                 <div className="space-y-2">
                   <div className="flex justify-between text-sm">
                     <span>Progress</span>
@@ -1375,7 +1391,7 @@ export default function Products() {
                     </div>
                   )}
                 </div>
-              ) : null}
+              )}
 
               <div className="flex justify-end gap-2">
                 <Button variant="outline" onClick={() => setIsBulkOpen(false)} disabled={bulkRunning}>
@@ -1586,7 +1602,7 @@ function VariantPlanner(props: {
             </table>
           </div>
           <p className="text-xs text-muted-foreground">
-            These are <b>proposed additions</b>. Drippr will review it.
+            These are <b>proposed additions</b>. Admin will create real Shopify variants based on this plan.
           </p>
         </div>
       )}
