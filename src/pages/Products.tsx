@@ -1364,7 +1364,7 @@ export default function Products() {
                   disabled={bulkRunning}
                 />
                 <p className="text-xs text-muted-foreground">
-                  Use the provided template that you can <a href="https://docs.google.com/spreadsheets/d/1OILveQzejRd25dJMISK2-7uENt5Wt33h/edit?usp=drive_link&ouid=102184731311255601911&rtpof=true&sd=true" className="text-blue-500">download from here</a>. The first sheet’s first row must be headers.
+                  Use the provided template that you can <a href="https://docs.google.com/spreadsheets/d/1OILveQzejRd25dJMISK2-7uENt5Wt33h/edit?usp=drive_link&ouid=102184731311255601911&rtpof=true&sd=true" className="text-blue-500" target="_blank">download from here</a>. The first sheet’s first row must be headers.
                 </p>
               </div>
 
