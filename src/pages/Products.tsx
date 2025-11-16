@@ -93,6 +93,8 @@ export default function Products() {
   const [products, setProducts] = useState<MerchantProduct[]>([]);
   const [search, setSearch] = useState("");
 
+  
+
   // --- Bulk upload dialog state ---
   const [isBulkOpen, setIsBulkOpen] = useState(false);
   const [bulkFile, setBulkFile] = useState<File | null>(null);
@@ -406,9 +408,14 @@ export default function Products() {
 
   // ---- NEW (edit images) ----
   const [editImageFiles, setEditImageFiles] = useState<File[]>([]);
-  const [editImagesLive, setEditImagesLive] = useState<string[]>([]);
   const [editSelectedDelete, setEditSelectedDelete] = useState<Record<string, boolean>>({});
   const [editImgBusy, setEditImgBusy] = useState(false);
+  // --- IMAGES state for edit drawer ---
+const [editImagesLive, setEditImagesLive] = useState<string[]>([]);     // current images (CDN URLs)
+const [editFiles, setEditFiles] = useState<File[]>([]);                 // newly selected local files
+const [editDelete, setEditDelete] = useState<Record<string, boolean>>({}); // urls to delete
+const [imgBusy, setImgBusy] = useState(false);
+
 
   function markRemove(vid: string, checked: boolean) {
     setRemoveVariantIds(prev => ({ ...prev, [vid]: checked }));
@@ -422,47 +429,52 @@ export default function Products() {
   }
 
   async function fetchDetails(productId: string) {
-    setLoadingDetails(true);
-    try {
-      const idToken = await getIdToken();
-      const r = await fetch(`/api/admin/products/update?id=${productId}&live=1`, {
-        headers: { Authorization: `Bearer ${idToken}` },
-      });
-      const j = await r.json();
-      if (!r.ok || !j.ok) throw new Error(j.error || "Failed to load product details");
+  setLoadingDetails(true);
+  try {
+    const idToken = await getIdToken();
+    const r = await fetch("/api/admin/products/update", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${idToken}`,
+      },
+      body: JSON.stringify({ op: "details", id: productId }),
+    });
+    const j = await r.json();
+    if (!r.ok || !j.ok) throw new Error(j.error || "Failed to load product details");
 
-      // ***** FIXED: read from j.product.variants & j.product.imagesLive *****
-      const p = j.product || {};
-      const variantsLive: ExistingVariant[] = Array.isArray(p.variants)
-        ? p.variants.map((v: any) => ({
-            id: v.id,
-            title: v.title || "",
-            optionValues: Array.isArray(v.optionValues) ? v.optionValues : (v.title ? String(v.title).split(" / ") : []),
-            price: v.price != null ? Number(v.price) : undefined,
-            quantity: v.quantity != null ? Number(v.quantity) : undefined,
-            sku: v.sku || undefined,
-            barcode: v.barcode || undefined,
-            weightGrams: v.weightGrams != null ? Number(v.weightGrams) : undefined,
-          }))
-        : [];
+    const p = j.product || {};
+    const variants: ExistingVariant[] = Array.isArray(p.variants)
+      ? p.variants.map((v: any) => ({
+          id: v.id,
+          title: v.title,
+          optionValues: Array.isArray(v.optionValues) ? v.optionValues : (v.title ? String(v.title).split(" / ") : []),
+          price: v.price != null ? Number(v.price) : undefined,
+          quantity: v.quantity != null ? Number(v.quantity) : undefined,
+          sku: v.sku || undefined,
+          barcode: v.barcode || undefined,
+          weightGrams: v.weightGrams != null ? Number(v.weightGrams) : undefined,
+        }))
+      : [];
 
-      setExistingVariants(variantsLive);
-      setRemoveVariantIds({});
-      setVariantQuickEdits({});
-      setEditImagesLive(Array.isArray(p.imagesLive) ? p.imagesLive : []);
-      setEditSelectedDelete({});
-      setEditImageFiles([]);
+    setExistingVariants(variants);
 
-      // reset planner for additions only
-      setOptions([{ name: "Size", values: [] }, { name: "Color", values: [] }]);
-      setValueInputs(["", "", ""]);
-      setVariantRows({});
-    } catch (e: any) {
-      toast.error(e?.message || "Failed to load product details");
-    } finally {
-      setLoadingDetails(false);
-    }
+    // images from Shopify (fallback to Firestore doc)
+    const liveUrls: string[] = Array.isArray(p.imagesLive) ? p.imagesLive : (Array.isArray(p.images) ? p.images : []);
+    setEditImagesLive(liveUrls);
+    setEditFiles([]);
+    setEditDelete({});
+    // reset planner for additions only
+    setOptions([{ name: "Size", values: [] }, { name: "Color", values: [] }]);
+    setValueInputs(["", "", ""]);
+    setVariantRows({});
+  } catch (e: any) {
+    toast.error(e?.message || "Failed to load product details");
+  } finally {
+    setLoadingDetails(false);
   }
+}
+
 
   function openEdit(p: MerchantProduct) {
     setEditing(p);
@@ -739,6 +751,102 @@ export default function Products() {
     setEditImageFiles(files);
   }
 
+  function onChooseEditFiles(e: React.ChangeEvent<HTMLInputElement>) {
+  const files = Array.from(e.target.files || []);
+  setEditFiles(prev => [...prev, ...files].slice(0, 10)); // cap if you want
+}
+
+function toggleDeleteUrl(u: string, on: boolean) {
+  setEditDelete(prev => ({ ...prev, [u]: on }));
+}
+
+async function addSelectedImages() {
+  if (!editing) return;
+  if (!editFiles.length) {
+    toast.info("Choose images first.");
+    return;
+  }
+  setImgBusy(true);
+  try {
+    const idToken = await getIdToken();
+
+    // 1) stage
+    const stageRes = await fetch("/api/admin/products/update", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
+      body: JSON.stringify({
+        op: "imagesStage",
+        files: editFiles.map(f => ({ filename: f.name, mimeType: f.type || "image/jpeg", fileSize: f.size })),
+      }),
+    });
+    const stage = await stageRes.json();
+    if (!stageRes.ok || !stage.ok) throw new Error(stage.error || "stagedUploadsCreate failed");
+    const targets: { url: string; resourceUrl: string; parameters: { name: string; value: string }[] }[] = stage.targets;
+
+    if (targets.length !== editFiles.length) throw new Error("Upload target count mismatch");
+
+    // 2) upload file → staged target
+    const resourceUrls: string[] = [];
+    for (let i = 0; i < editFiles.length; i++) {
+      const t = targets[i];
+      const form = new FormData();
+      for (const p of t.parameters) form.append(p.name, p.value);
+      form.append("file", editFiles[i]); // must be exactly "file"
+      const up = await fetch(t.url, { method: "POST", body: form });
+      if (!up.ok) {
+        const txt = await up.text().catch(() => "");
+        throw new Error(`Upload failed (${up.status}) ${txt}`);
+      }
+      resourceUrls.push(t.resourceUrl);
+    }
+
+    // 3) attach to product and mirror in Firestore
+    const attachRes = await fetch("/api/admin/products/update", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
+      body: JSON.stringify({ op: "imagesAttach", id: editing.id, resourceUrls }),
+    });
+    const attach = await attachRes.json();
+    if (!attachRes.ok || !attach.ok) throw new Error(attach.error || "Attach failed");
+
+    setEditImagesLive(Array.isArray(attach.images) ? attach.images : []);
+    setEditFiles([]);
+    toast.success("Images added.");
+  } catch (e: any) {
+    toast.error(e?.message || "Failed to add images");
+  } finally {
+    setImgBusy(false);
+  }
+}
+
+async function removeSelectedImages() {
+  if (!editing) return;
+  const urls = Object.entries(editDelete).filter(([_, on]) => on).map(([u]) => u);
+  if (!urls.length) {
+    toast.info("Select images to remove.");
+    return;
+  }
+  setImgBusy(true);
+  try {
+    const idToken = await getIdToken();
+    const r = await fetch("/api/admin/products/update", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
+      body: JSON.stringify({ op: "imagesDelete", id: editing.id, urls }),
+    });
+    const j = await r.json();
+    if (!r.ok || !j.ok) throw new Error(j.error || "Delete failed");
+    setEditImagesLive(Array.isArray(j.images) ? j.images : []);
+    setEditDelete({});
+    toast.success("Images removed.");
+  } catch (e: any) {
+    toast.error(e?.message || "Failed to remove images");
+  } finally {
+    setImgBusy(false);
+  }
+}
+
+
   async function handleEditAddSelectedImages() {
     if (!editing) return;
     if (!editImageFiles.length) {
@@ -838,38 +946,51 @@ export default function Products() {
 
             <form onSubmit={handleSubmit} className="space-y-8">
               {/* Product Images */}
-              <div className="space-y-2">
-                <Label>Product Images (Max 5)</Label>
-                <div className="grid grid-cols-5 gap-4">
-                  {imagePreviews.map((preview, index) => (
-                    <div key={index} className="relative aspect-square">
-                      <img
-                        src={preview}
-                        alt={`Preview ${index + 1}`}
-                        className="w-full h-full object-cover rounded-md border"
-                      />
-                      <Button
-                        type="button"
-                        variant="destructive"
-                        size="icon"
-                        className="absolute -top-2 -right-2 h-6 w-6 rounded-full"
-                        onClick={() => removeImage(index)}
-                      >
-                        <X className="h-3 w-3" />
-                      </Button>
-                    </div>
-                  ))}
-                  {selectedImages.length < 5 && (
-                    <label className="aspect-square border-2 border-dashed rounded-md flex items-center justify-center cursor-pointer hover:bg-muted/50 transition-colors">
-                      <div className="text-center">
-                        <Upload className="h-6 w-6 mx-auto mb-2 text-muted-foreground" />
-                        <span className="text-xs text-muted-foreground">Upload</span>
-                      </div>
-                      <input type="file" accept="image/*" multiple className="hidden" onChange={handleImageSelect} />
-                    </label>
-                  )}
-                </div>
-              </div>
+<div className="space-y-2">
+  <Label>Product Images</Label>
+
+  {/* Current images grid */}
+  {loadingDetails ? (
+    <div className="text-sm text-muted-foreground">Loading images…</div>
+  ) : editImagesLive.length === 0 ? (
+    <div className="text-sm text-muted-foreground">No images on this product.</div>
+  ) : (
+    <div className="grid grid-cols-5 gap-3">
+      {editImagesLive.map((u) => (
+        <div key={u} className="relative">
+          <img src={u} className="w-full aspect-square object-cover rounded border" />
+          <label className="absolute left-1 top-1 bg-white/80 rounded px-1 text-xs">
+            <input
+              type="checkbox"
+              className="align-middle mr-1"
+              checked={!!editDelete[u]}
+              onChange={(e) => toggleDeleteUrl(u, e.target.checked)}
+            />
+            Remove
+          </label>
+        </div>
+      ))}
+    </div>
+  )}
+
+  {/* Add images */}
+  <div className="flex items-center gap-3 pt-2">
+    <label className="inline-flex items-center gap-2">
+      <input type="file" multiple accept="image/*" onChange={onChooseEditFiles} disabled={imgBusy} />
+      <span className="text-sm text-muted-foreground">
+        {editFiles.length ? `${editFiles.length} file(s) ready to upload` : "Choose files"}
+      </span>
+    </label>
+
+    <Button type="button" onClick={addSelectedImages} disabled={imgBusy || !editFiles.length}>
+      {imgBusy ? "Working…" : "Add selected images"}
+    </Button>
+    <Button type="button" variant="destructive" onClick={removeSelectedImages} disabled={imgBusy || !Object.values(editDelete).some(Boolean)}>
+      {imgBusy ? "Working…" : "Remove selected"}
+    </Button>
+  </div>
+</div>
+
 
               {/* Basic Info */}
               <div className="space-y-2">
