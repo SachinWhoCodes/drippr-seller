@@ -3,6 +3,9 @@ import { getAdmin } from "../../_lib/firebaseAdmin.js";
 import ImageKit from "imagekit";
 import { shopifyGraphQL } from "../../_lib/shopify.js";
 
+const DEBUG = process.env.API_DEBUG === "1" || process.env.NODE_ENV !== "production";
+const log = (...a: any[]) => { if (DEBUG) console.log("[products.update]", ...a); };
+
 const imagekit = new ImageKit({
   publicKey: process.env.IMAGEKIT_PUBLIC_KEY || "",
   privateKey: process.env.IMAGEKIT_PRIVATE_KEY || "",
@@ -11,7 +14,6 @@ const imagekit = new ImageKit({
 
 /* ---------------- Shopify GQL ---------------- */
 
-// product details (variants) + images list for edit drawer
 const PRODUCT_DETAILS_QUERY = /* GraphQL */ `
   query product($id: ID!) {
     product(id: $id) {
@@ -37,7 +39,6 @@ const PRODUCT_DETAILS_QUERY = /* GraphQL */ `
   }
 `;
 
-// live edits (price)
 const VARIANTS_BULK_UPDATE = /* GraphQL */ `
   mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
     productVariantsBulkUpdate(productId: $productId, variants: $variants) {
@@ -47,7 +48,6 @@ const VARIANTS_BULK_UPDATE = /* GraphQL */ `
   }
 `;
 
-// absolute stock (optional)
 const INVENTORY_SET_ON_HAND = /* GraphQL */ `
   mutation inventorySetOnHandQuantities($input: InventorySetOnHandQuantitiesInput!) {
     inventorySetOnHandQuantities(input: $input) {
@@ -57,21 +57,15 @@ const INVENTORY_SET_ON_HAND = /* GraphQL */ `
   }
 `;
 
-// stage uploads (same shape as /api/admin/uploads/start)
 const STAGED_UPLOADS_CREATE = /* GraphQL */ `
   mutation stagedUploadsCreate($input: [StagedUploadInput!]!) {
     stagedUploadsCreate(input: $input) {
-      stagedTargets {
-        url
-        resourceUrl
-        parameters { name value }
-      }
+      stagedTargets { url resourceUrl parameters { name value } }
       userErrors { field message }
     }
   }
 `;
 
-// attach staged images to an existing product
 const PRODUCT_CREATE_MEDIA = /* GraphQL */ `
   mutation productCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
     productCreateMedia(productId: $productId, media: $media) {
@@ -81,7 +75,6 @@ const PRODUCT_CREATE_MEDIA = /* GraphQL */ `
   }
 `;
 
-// list images (CDN urls)
 const PRODUCT_IMAGES_QUERY = /* GraphQL */ `
   query productImages($id: ID!) {
     product(id: $id) {
@@ -91,7 +84,6 @@ const PRODUCT_IMAGES_QUERY = /* GraphQL */ `
   }
 `;
 
-// delete an image by image id
 const PRODUCT_IMAGE_DELETE = /* GraphQL */ `
   mutation productImageDelete($id: ID!) {
     productImageDelete(id: $id) {
@@ -103,8 +95,28 @@ const PRODUCT_IMAGE_DELETE = /* GraphQL */ `
 
 /* ---------------- Helpers ---------------- */
 
-async function listImageUrls(productId: string): Promise<{ idsByUrl: Record<string,string>, urls: string[] }> {
-  const r = await shopifyGraphQL(PRODUCT_IMAGES_QUERY, { id: productId });
+function gqlName(doc: string) {
+  const m = /(query|mutation)\s+([A-Za-z0-9_]+)/.exec(doc);
+  return m?.[2] || "unknown";
+}
+
+async function sgql(doc: string, vars: any, where: string) {
+  const name = gqlName(doc);
+  try {
+    const r = await shopifyGraphQL(doc, vars);
+    if (r?.errors?.length) {
+      throw new Error(r.errors.map((e: any) => e?.message || "GraphQL error").join("; "));
+    }
+    return r;
+  } catch (e: any) {
+    const msg = `[${where}:${name}] ${e?.message || e}`;
+    log(msg);
+    throw new Error(msg);
+  }
+}
+
+async function listImageUrls(productId: string): Promise<{ idsByUrl: Record<string, string>, urls: string[] }> {
+  const r = await sgql(PRODUCT_IMAGES_QUERY, { id: productId }, "listImageUrls");
   const nodes = r?.data?.product?.images?.nodes || [];
   const urls: string[] = [];
   const idsByUrl: Record<string, string> = {};
@@ -125,56 +137,70 @@ function gramsFrom(weight: number | null, unit: string | null) {
   return undefined;
 }
 
+function bad(res: any, status: number, code: string, error?: any, extra?: any) {
+  const payload: any = { ok: false, code, error: (error?.message ?? error ?? "Unknown error") };
+  if (DEBUG && extra) payload.extra = extra;
+  return res.status(status).json(payload);
+}
+
 /* ---------------- Handler ---------------- */
 
 export default async function handler(req: any, res: any) {
+  const started = Date.now();
   try {
     const { adminAuth, adminDb } = getAdmin();
 
     // --- auth ---
     const authHeader = String(req.headers.authorization || "");
     const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-    if (!token) return res.status(401).json({ ok: false, error: "Missing Authorization" });
+    if (!token) return bad(res, 401, "auth/missing", "Missing Authorization");
 
-    const decoded = await adminAuth.verifyIdToken(token);
-    const uid = decoded.uid as string;
+    let uid = "";
+    try {
+      const decoded = await adminAuth.verifyIdToken(token);
+      uid = decoded.uid as string;
+    } catch (e) {
+      return bad(res, 401, "auth/verify-failed", e);
+    }
 
-    /* ============= GET (kept for back-compat simple fetch) ============= */
     if (req.method === "GET") {
       const id = String(req.query.id || "");
-      if (!id) return res.status(400).json({ ok: false, error: "Missing id" });
+      if (!id) return bad(res, 400, "get/missing-id");
 
       const snap = await adminDb.collection("merchantProducts").doc(id).get();
-      if (!snap.exists) return res.status(404).json({ ok: false, error: "Not found" });
+      if (!snap.exists) return bad(res, 404, "get/not-found");
 
       const doc = snap.data() || {};
-      if (doc.merchantId && doc.merchantId !== uid) return res.status(403).json({ ok: false, error: "Forbidden" });
+      if (doc.merchantId && doc.merchantId !== uid) return bad(res, 403, "get/forbidden");
 
       return res.status(200).json({ ok: true, product: { id: snap.id, ...doc } });
     }
 
-    /* ============= POST ============= */
-    if (req.method === "POST") {
-      const body = req.body || {};
-      const op = typeof body.op === "string" ? body.op : "";
+    if (req.method !== "POST") return bad(res, 405, "method/not-allowed");
 
-      /* ---------- ImageKit sign/save (unchanged) ---------- */
-      if (op === "mediaSign") {
-        if (!process.env.IMAGEKIT_PUBLIC_KEY || !process.env.IMAGEKIT_URL_ENDPOINT || !process.env.IMAGEKIT_PRIVATE_KEY) {
-          return res.status(500).json({ ok: false, error: "ImageKit not configured on server" });
-        }
-        const authParams = imagekit.getAuthenticationParameters();
-        return res.status(200).json({
-          ok: true,
-          auth: authParams,
-          publicKey: process.env.IMAGEKIT_PUBLIC_KEY,
-          urlEndpoint: process.env.IMAGEKIT_URL_ENDPOINT,
-        });
+    const body = req.body || {};
+    const op = typeof body.op === "string" ? body.op : "";
+
+    log("op:", op);
+
+    /* ---------- ImageKit sign/save ---------- */
+    if (op === "mediaSign") {
+      if (!process.env.IMAGEKIT_PUBLIC_KEY || !process.env.IMAGEKIT_URL_ENDPOINT || !process.env.IMAGEKIT_PRIVATE_KEY) {
+        return bad(res, 500, "images/sign/config-missing", "ImageKit not configured on server");
       }
+      const authParams = imagekit.getAuthenticationParameters();
+      return res.status(200).json({
+        ok: true,
+        auth: authParams,
+        publicKey: process.env.IMAGEKIT_PUBLIC_KEY,
+        urlEndpoint: process.env.IMAGEKIT_URL_ENDPOINT,
+      });
+    }
 
-      if (op === "mediaSave") {
+    if (op === "mediaSave") {
+      try {
         const records = Array.isArray(body.records) ? body.records : [];
-        if (!records.length) return res.status(400).json({ ok: false, error: "No records to save" });
+        if (!records.length) return bad(res, 400, "images/save/no-records");
 
         const batch = adminDb.batch();
         const now = Date.now();
@@ -196,87 +222,95 @@ export default async function handler(req: any, res: any) {
         }
         await batch.commit();
         return res.status(200).json({ ok: true, saved: records.length });
+      } catch (e) {
+        return bad(res, 500, "images/save/exception", e);
       }
+    }
 
-      /* ---------- Edit-drawer: image ops ---------- */
-
-      // 1) return staged targets
-      if (op === "imagesStage") {
+    /* ---------- Image ops for edit drawer ---------- */
+    if (op === "imagesStage") {
+      try {
         const files = Array.isArray(body.files) ? body.files : [];
-        if (!files.length) return res.status(400).json({ ok: false, error: "No files provided" });
+        if (!files.length) return bad(res, 400, "images/stage/no-files");
 
         const input = files.map((f: any) => ({
           resource: "IMAGE",
           filename: String(f.filename || "image.jpg"),
           mimeType: String(f.mimeType || "image/jpeg"),
-          fileSize: String(f.fileSize),   // Shopify UnsignedInt64 expects string
+          fileSize: String(f.fileSize ?? f.size ?? 0), // be lenient
           httpMethod: "POST",
         }));
 
-        const r = await shopifyGraphQL(STAGED_UPLOADS_CREATE, { input });
+        const r = await sgql(STAGED_UPLOADS_CREATE, { input }, "imagesStage");
         const errs = r?.data?.stagedUploadsCreate?.userErrors || [];
-        if (errs.length) {
-          return res.status(400).json({ ok: false, error: errs.map((e: any) => e.message).join("; ") });
-        }
+        if (errs.length) return bad(res, 400, "images/stage/userErrors", new Error(errs.map((e: any) => e.message).join("; ")), { errs });
+
         const targets = r?.data?.stagedUploadsCreate?.stagedTargets || [];
         return res.status(200).json({ ok: true, targets });
+      } catch (e) {
+        return bad(res, 500, "images/stage/exception", e);
       }
+    }
 
-      // 2) attach staged images
-      if (op === "imagesAttach") {
+    if (op === "imagesAttach") {
+      try {
         const mpDocId = String(body.id || "");
         const resourceUrls: string[] = Array.isArray(body.resourceUrls) ? body.resourceUrls : [];
-        if (!mpDocId) return res.status(400).json({ ok: false, error: "Missing id" });
-        if (!resourceUrls.length) return res.status(400).json({ ok: false, error: "No resourceUrls" });
+        if (!mpDocId) return bad(res, 400, "images/attach/missing-id");
+        if (!resourceUrls.length) return bad(res, 400, "images/attach/no-resourceUrls");
 
         const ref = adminDb.collection("merchantProducts").doc(mpDocId);
         const snap = await ref.get();
-        if (!snap.exists) return res.status(404).json({ ok: false, error: "Not found" });
+        if (!snap.exists) return bad(res, 404, "images/attach/not-found");
 
         const doc = snap.data() || {};
-        if (doc.merchantId && doc.merchantId !== uid) return res.status(403).json({ ok: false, error: "Forbidden" });
+        if (doc.merchantId && doc.merchantId !== uid) return bad(res, 403, "images/attach/forbidden");
 
         const shopifyProductId: string | undefined = doc.shopifyProductId;
-        if (!shopifyProductId) return res.status(400).json({ ok: false, error: "No Shopify product id" });
+        if (!shopifyProductId) return bad(res, 400, "images/attach/no-shopifyProductId");
 
         const media = resourceUrls.map(u => ({ originalSource: u, mediaContentType: "IMAGE" as const }));
-        const attach = await shopifyGraphQL(PRODUCT_CREATE_MEDIA, { productId: shopifyProductId, media });
+        const attach = await sgql(PRODUCT_CREATE_MEDIA, { productId: shopifyProductId, media }, "imagesAttach");
         const mErrs = attach?.data?.productCreateMedia?.mediaUserErrors || [];
-        if (mErrs.length) return res.status(400).json({ ok: false, error: mErrs.map((e:any)=>e.message).join("; ") });
+        if (mErrs.length) return bad(res, 400, "images/attach/mediaUserErrors", new Error(mErrs.map((e:any)=>e.message).join("; ")), { mErrs });
 
         const { urls } = await listImageUrls(shopifyProductId);
         await ref.set({ images: urls, image: urls[0] || null, updatedAt: Date.now() }, { merge: true });
 
         return res.status(200).json({ ok: true, images: urls });
+      } catch (e) {
+        return bad(res, 500, "images/attach/exception", e);
       }
+    }
 
-      // 3) delete by urls
-      if (op === "imagesDelete") {
+    if (op === "imagesDelete") {
+      try {
         const mpDocId = String(body.id || "");
         const urlsToDelete: string[] = Array.isArray(body.urls) ? body.urls : [];
-        if (!mpDocId) return res.status(400).json({ ok: false, error: "Missing id" });
-        if (!urlsToDelete.length) return res.status(400).json({ ok: false, error: "No urls" });
+        if (!mpDocId) return bad(res, 400, "images/delete/missing-id");
+        if (!urlsToDelete.length) return bad(res, 400, "images/delete/no-urls");
 
         const ref = adminDb.collection("merchantProducts").doc(mpDocId);
         const snap = await ref.get();
-        if (!snap.exists) return res.status(404).json({ ok: false, error: "Not found" });
+        if (!snap.exists) return bad(res, 404, "images/delete/not-found");
 
         const doc = snap.data() || {};
-        if (doc.merchantId && doc.merchantId !== uid) return res.status(403).json({ ok: false, error: "Forbidden" });
+        if (doc.merchantId && doc.merchantId !== uid) return bad(res, 403, "images/delete/forbidden");
 
         const shopifyProductId: string | undefined = doc.shopifyProductId;
-        if (!shopifyProductId) return res.status(400).json({ ok: false, error: "No Shopify product id" });
+        if (!shopifyProductId) return bad(res, 400, "images/delete/no-shopifyProductId");
 
         const { idsByUrl } = await listImageUrls(shopifyProductId);
+
         for (const u of urlsToDelete) {
           const imgId = idsByUrl[u];
-          if (!imgId) continue;
+          if (!imgId) { log("imagesDelete: URL not found on Shopify", u); continue; }
           try {
-            const del = await shopifyGraphQL(PRODUCT_IMAGE_DELETE, { id: imgId });
+            const del = await sgql(PRODUCT_IMAGE_DELETE, { id: imgId }, "imagesDelete");
             const errs = del?.data?.productImageDelete?.userErrors || [];
-            if (errs.length) console.warn("productImageDelete errors:", errs);
+            if (errs.length) log("productImageDelete userErrors:", errs);
           } catch (e) {
-            console.warn("productImageDelete failed:", e);
+            log("productImageDelete failed:", e);
           }
         }
 
@@ -284,26 +318,30 @@ export default async function handler(req: any, res: any) {
         await ref.set({ images: refreshed.urls, image: refreshed.urls[0] || null, updatedAt: Date.now() }, { merge: true });
 
         return res.status(200).json({ ok: true, images: refreshed.urls });
+      } catch (e) {
+        return bad(res, 500, "images/delete/exception", e);
       }
+    }
 
-      /* ---------- Details for edit drawer ---------- */
-      if (op === "details") {
+    /* ---------- Details for edit drawer ---------- */
+    if (op === "details") {
+      try {
         const id = String(body.id || "");
-        if (!id) return res.status(400).json({ ok: false, error: "Missing id" });
+        if (!id) return bad(res, 400, "details/missing-id");
 
         const ref = adminDb.collection("merchantProducts").doc(id);
         const snap = await ref.get();
-        if (!snap.exists) return res.status(404).json({ ok: false, error: "Not found" });
+        if (!snap.exists) return bad(res, 404, "details/not-found");
 
         const doc = snap.data() || {};
-        if (doc.merchantId && doc.merchantId !== uid) return res.status(403).json({ ok: false, error: "Forbidden" });
+        if (doc.merchantId && doc.merchantId !== uid) return bad(res, 403, "details/forbidden");
 
         let productOptions: any[] = [];
         let variants: any[] = [];
         let imagesLive: string[] = [];
 
         if (doc.shopifyProductId) {
-          const r = await shopifyGraphQL(PRODUCT_DETAILS_QUERY, { id: doc.shopifyProductId });
+          const r = await sgql(PRODUCT_DETAILS_QUERY, { id: doc.shopifyProductId }, "details");
           const p = r?.data?.product;
 
           if (p) {
@@ -334,21 +372,26 @@ export default async function handler(req: any, res: any) {
           ok: true,
           product: { id: snap.id, ...doc, productOptions, variants, imagesLive },
         });
+      } catch (e) {
+        return bad(res, 500, "details/exception", e);
       }
+    }
 
-      /* ---------- Default: product update (quick + review) ---------- */
+    /* ---------- Default: product update (quick + review) ---------- */
+    try {
       const { id } = body;
-      if (!id) return res.status(400).json({ ok: false, error: "Missing id" });
+      if (!id) return bad(res, 400, "update/missing-id");
 
       const ref = adminDb.collection("merchantProducts").doc(id);
       const snap = await ref.get();
-      if (!snap.exists) return res.status(404).json({ ok: false, error: "Not found" });
+      if (!snap.exists) return bad(res, 404, "update/not-found");
 
       const doc = snap.data() || {};
-      if (doc.merchantId && doc.merchantId !== uid) return res.status(403).json({ ok: false, error: "Forbidden" });
+      if (doc.merchantId && doc.merchantId !== uid) return bad(res, 403, "update/forbidden");
 
       const shopifyProductId: string | undefined = doc.shopifyProductId;
-      const defaultVariantId: string | undefined = Array.isArray(doc.shopifyVariantIds) ? doc.shopifyVariantIds[0] : undefined;
+      const defaultVariantId: string | undefined =
+        Array.isArray(doc.shopifyVariantIds) ? doc.shopifyVariantIds[0] : (doc.shopifyVariantId || undefined);
 
       const updates: any = { updatedAt: Date.now() };
       let adminNeedsReview = false;
@@ -377,12 +420,9 @@ export default async function handler(req: any, res: any) {
       }
 
       if (variantsPayload.length && shopifyProductId) {
-        const updateRes = await shopifyGraphQL(VARIANTS_BULK_UPDATE, { productId: shopifyProductId, variants: variantsPayload });
+        const updateRes = await sgql(VARIANTS_BULK_UPDATE, { productId: shopifyProductId, variants: variantsPayload }, "update/variants");
         const errors = updateRes?.data?.productVariantsBulkUpdate?.userErrors || [];
-        if (errors.length) {
-          const msg = errors.map((e: any) => e.message).join("; ");
-          return res.status(400).json({ ok: false, error: msg || "Failed to update variants on Shopify" });
-        }
+        if (errors.length) return bad(res, 400, "update/variants/userErrors", new Error(errors.map((e:any)=>e.message).join("; ")), { errors });
       }
 
       if (quickPrice != null && !Number.isNaN(quickPrice)) updates.price = quickPrice;
@@ -394,13 +434,15 @@ export default async function handler(req: any, res: any) {
         const inventoryItemId: string | undefined = doc.inventoryItemId;
         if (locationId && inventoryItemId) {
           try {
-            const invRes = await shopifyGraphQL(INVENTORY_SET_ON_HAND, {
-              input: { reason: "correction", setQuantities: [{ inventoryItemId, locationId, quantity: quickQty }] },
-            });
+            const invRes = await sgql(
+              INVENTORY_SET_ON_HAND,
+              { input: { reason: "correction", setQuantities: [{ inventoryItemId, locationId, quantity: quickQty }] } },
+              "update/inventory"
+            );
             const invErrors = invRes?.data?.inventorySetOnHandQuantities?.userErrors || [];
-            if (invErrors.length) console.warn("inventorySetOnHandQuantities errors:", invErrors);
+            if (invErrors.length) log("inventorySetOnHandQuantities userErrors:", invErrors);
           } catch (e) {
-            console.warn("inventorySetOnHandQuantities failed:", e);
+            log("inventorySetOnHandQuantities failed:", e);
           }
         }
       }
@@ -442,11 +484,13 @@ export default async function handler(req: any, res: any) {
           ? "Updated live on Shopify."
           : "No changes detected.",
       });
+    } catch (e) {
+      return bad(res, 500, "update/exception", e);
     }
-
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
   } catch (e: any) {
-    console.error("update endpoint error:", e?.message || e);
-    return res.status(500).json({ ok: false, error: e?.message || "Internal error" });
+    console.error("update endpoint fatal:", e?.message || e);
+    return bad(res, 500, "fatal", e);
+  } finally {
+    log("done in", Date.now() - started, "ms");
   }
 }
