@@ -14,6 +14,7 @@ const imagekit = new ImageKit({
 
 /* ---------------- Shopify GQL ---------------- */
 
+// NOTE: removed weight and weightUnit from ProductVariant
 const PRODUCT_DETAILS_QUERY = /* GraphQL */ `
   query product($id: ID!) {
     product(id: $id) {
@@ -29,8 +30,6 @@ const PRODUCT_DETAILS_QUERY = /* GraphQL */ `
           compareAtPrice
           barcode
           inventoryQuantity
-          weight
-          weightUnit
           selectedOptions { name value }
         }
       }
@@ -128,13 +127,6 @@ async function listImageUrls(productId: string): Promise<{ idsByUrl: Record<stri
     }
   }
   return { idsByUrl, urls };
-}
-
-function gramsFrom(weight: number | null, unit: string | null) {
-  if (typeof weight !== "number") return undefined;
-  if (unit === "KILOGRAMS") return weight * 1000;
-  if (unit === "GRAMS") return weight;
-  return undefined;
 }
 
 function bad(res: any, status: number, code: string, error?: any, extra?: any) {
@@ -237,7 +229,7 @@ export default async function handler(req: any, res: any) {
           resource: "IMAGE",
           filename: String(f.filename || "image.jpg"),
           mimeType: String(f.mimeType || "image/jpeg"),
-          fileSize: String(f.fileSize ?? f.size ?? 0), // be lenient
+          fileSize: String(f.fileSize ?? f.size ?? 0),
           httpMethod: "POST",
         }));
 
@@ -360,7 +352,7 @@ export default async function handler(req: any, res: any) {
                 quantity: typeof v.inventoryQuantity === "number" ? v.inventoryQuantity : undefined,
                 sku: v.sku || undefined,
                 barcode: v.barcode || undefined,
-                weightGrams: gramsFrom(v.weight, v.weightUnit),
+                // weightGrams omitted (field removed in your API version)
               };
             });
 
