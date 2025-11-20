@@ -3,18 +3,23 @@ import { getAdmin } from "../../_lib/firebaseAdmin.js";
 import ImageKit from "imagekit";
 import { shopifyGraphQL } from "../../_lib/shopify.js";
 
-const DEBUG = process.env.API_DEBUG === "1" || process.env.NODE_ENV !== "production";
-const log = (...a: any[]) => { if (DEBUG) console.log("[products.update]", ...a); };
-
 const imagekit = new ImageKit({
   publicKey: process.env.IMAGEKIT_PUBLIC_KEY || "",
   privateKey: process.env.IMAGEKIT_PRIVATE_KEY || "",
   urlEndpoint: process.env.IMAGEKIT_URL_ENDPOINT || "",
 });
 
+/* ---------------- Small helpers ---------------- */
+function normSku(raw: string): string {
+  return String(raw || "").trim().toUpperCase().replace(/\s+/g, "-");
+}
+function skuClaimId(uid: string, sku: string) {
+  return `${uid}__${normSku(sku)}`;
+}
+
 /* ---------------- Shopify GQL ---------------- */
 
-// NOTE: removed weight and weightUnit from ProductVariant
+// NOTE: removed variant.weight & variant.weightUnit (they caused 500)
 const PRODUCT_DETAILS_QUERY = /* GraphQL */ `
   query product($id: ID!) {
     product(id: $id) {
@@ -33,11 +38,14 @@ const PRODUCT_DETAILS_QUERY = /* GraphQL */ `
           selectedOptions { name value }
         }
       }
-      images(first: 100) { nodes { id url } }
+      images(first: 100) {
+        nodes { id url }
+      }
     }
   }
 `;
 
+// live edits (price only here)
 const VARIANTS_BULK_UPDATE = /* GraphQL */ `
   mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
     productVariantsBulkUpdate(productId: $productId, variants: $variants) {
@@ -47,6 +55,7 @@ const VARIANTS_BULK_UPDATE = /* GraphQL */ `
   }
 `;
 
+// absolute stock (optional: needs SHOPIFY_LOCATION_ID + inventoryItemId on doc)
 const INVENTORY_SET_ON_HAND = /* GraphQL */ `
   mutation inventorySetOnHandQuantities($input: InventorySetOnHandQuantitiesInput!) {
     inventorySetOnHandQuantities(input: $input) {
@@ -56,15 +65,21 @@ const INVENTORY_SET_ON_HAND = /* GraphQL */ `
   }
 `;
 
+// stage uploads (same as /uploads/start)
 const STAGED_UPLOADS_CREATE = /* GraphQL */ `
   mutation stagedUploadsCreate($input: [StagedUploadInput!]!) {
     stagedUploadsCreate(input: $input) {
-      stagedTargets { url resourceUrl parameters { name value } }
+      stagedTargets {
+        url
+        resourceUrl
+        parameters { name value }
+      }
       userErrors { field message }
     }
   }
 `;
 
+// attach staged images to an existing product
 const PRODUCT_CREATE_MEDIA = /* GraphQL */ `
   mutation productCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
     productCreateMedia(productId: $productId, media: $media) {
@@ -74,15 +89,19 @@ const PRODUCT_CREATE_MEDIA = /* GraphQL */ `
   }
 `;
 
+// list product images (CDN urls)
 const PRODUCT_IMAGES_QUERY = /* GraphQL */ `
   query productImages($id: ID!) {
     product(id: $id) {
       id
-      images(first: 100) { nodes { id url } }
+      images(first: 100) {
+        nodes { id url }
+      }
     }
   }
 `;
 
+// delete a single image by id
 const PRODUCT_IMAGE_DELETE = /* GraphQL */ `
   mutation productImageDelete($id: ID!) {
     productImageDelete(id: $id) {
@@ -92,110 +111,88 @@ const PRODUCT_IMAGE_DELETE = /* GraphQL */ `
   }
 `;
 
+// hard-delete product in Shopify (we'll use this in the safe deletion flow)
+const PRODUCT_DELETE = /* GraphQL */ `
+  mutation productDelete($input: ProductDeleteInput!) {
+    productDelete(input: $input) {
+      deletedProductId
+      userErrors { field message }
+    }
+  }
+`;
+
 /* ---------------- Helpers ---------------- */
 
-function gqlName(doc: string) {
-  const m = /(query|mutation)\s+([A-Za-z0-9_]+)/.exec(doc);
-  return m?.[2] || "unknown";
-}
-
-async function sgql(doc: string, vars: any, where: string) {
-  const name = gqlName(doc);
-  try {
-    const r = await shopifyGraphQL(doc, vars);
-    if (r?.errors?.length) {
-      throw new Error(r.errors.map((e: any) => e?.message || "GraphQL error").join("; "));
-    }
-    return r;
-  } catch (e: any) {
-    const msg = `[${where}:${name}] ${e?.message || e}`;
-    log(msg);
-    throw new Error(msg);
-  }
-}
-
 async function listImageUrls(productId: string): Promise<{ idsByUrl: Record<string, string>, urls: string[] }> {
-  const r = await sgql(PRODUCT_IMAGES_QUERY, { id: productId }, "listImageUrls");
+  const r = await shopifyGraphQL(PRODUCT_IMAGES_QUERY, { id: productId });
   const nodes = r?.data?.product?.images?.nodes || [];
   const urls: string[] = [];
   const idsByUrl: Record<string, string> = {};
   for (const n of nodes) {
     if (n?.url && n?.id) {
-      const u = String(n.url);
-      urls.push(u);
-      idsByUrl[u] = String(n.id);
+      urls.push(String(n.url));
+      idsByUrl[String(n.url)] = String(n.id);
     }
   }
   return { idsByUrl, urls };
 }
 
-function bad(res: any, status: number, code: string, error?: any, extra?: any) {
-  const payload: any = { ok: false, code, error: (error?.message ?? error ?? "Unknown error") };
-  if (DEBUG && extra) payload.extra = extra;
-  return res.status(status).json(payload);
-}
-
 /* ---------------- Handler ---------------- */
 
 export default async function handler(req: any, res: any) {
-  const started = Date.now();
   try {
     const { adminAuth, adminDb } = getAdmin();
 
     // --- auth ---
     const authHeader = String(req.headers.authorization || "");
     const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-    if (!token) return bad(res, 401, "auth/missing", "Missing Authorization");
+    if (!token) return res.status(401).json({ ok: false, error: "Missing Authorization" });
 
-    let uid = "";
-    try {
-      const decoded = await adminAuth.verifyIdToken(token);
-      uid = decoded.uid as string;
-    } catch (e) {
-      return bad(res, 401, "auth/verify-failed", e);
-    }
+    const decoded = await adminAuth.verifyIdToken(token);
+    const uid = decoded.uid as string;
 
+    /* ============= GET (back-compat simple fetch) ============= */
     if (req.method === "GET") {
       const id = String(req.query.id || "");
-      if (!id) return bad(res, 400, "get/missing-id");
+      if (!id) return res.status(400).json({ ok: false, error: "Missing id" });
 
       const snap = await adminDb.collection("merchantProducts").doc(id).get();
-      if (!snap.exists) return bad(res, 404, "get/not-found");
+      if (!snap.exists) return res.status(404).json({ ok: false, error: "Not found" });
 
       const doc = snap.data() || {};
-      if (doc.merchantId && doc.merchantId !== uid) return bad(res, 403, "get/forbidden");
+      if (doc.merchantId && doc.merchantId !== uid) {
+        return res.status(403).json({ ok: false, error: "Forbidden" });
+      }
 
       return res.status(200).json({ ok: true, product: { id: snap.id, ...doc } });
     }
 
-    if (req.method !== "POST") return bad(res, 405, "method/not-allowed");
+    /* ============= POST ============= */
+    if (req.method === "POST") {
+      const body = req.body || {};
+      const op = typeof body.op === "string" ? body.op : "";
 
-    const body = req.body || {};
-    const op = typeof body.op === "string" ? body.op : "";
-
-    log("op:", op);
-
-    /* ---------- ImageKit sign/save ---------- */
-    if (op === "mediaSign") {
-      if (!process.env.IMAGEKIT_PUBLIC_KEY || !process.env.IMAGEKIT_URL_ENDPOINT || !process.env.IMAGEKIT_PRIVATE_KEY) {
-        return bad(res, 500, "images/sign/config-missing", "ImageKit not configured on server");
+      /* ---------- ImageKit signing / save media (unchanged) ---------- */
+      if (op === "mediaSign") {
+        if (!process.env.IMAGEKIT_PUBLIC_KEY || !process.env.IMAGEKIT_URL_ENDPOINT || !process.env.IMAGEKIT_PRIVATE_KEY) {
+          return res.status(500).json({ ok: false, error: "ImageKit not configured on server" });
+        }
+        const authParams = imagekit.getAuthenticationParameters();
+        return res.status(200).json({
+          ok: true,
+          auth: authParams,
+          publicKey: process.env.IMAGEKIT_PUBLIC_KEY,
+          urlEndpoint: process.env.IMAGEKIT_URL_ENDPOINT,
+        });
       }
-      const authParams = imagekit.getAuthenticationParameters();
-      return res.status(200).json({
-        ok: true,
-        auth: authParams,
-        publicKey: process.env.IMAGEKIT_PUBLIC_KEY,
-        urlEndpoint: process.env.IMAGEKIT_URL_ENDPOINT,
-      });
-    }
 
-    if (op === "mediaSave") {
-      try {
+      if (op === "mediaSave") {
         const records = Array.isArray(body.records) ? body.records : [];
-        if (!records.length) return bad(res, 400, "images/save/no-records");
+        if (!records.length) return res.status(400).json({ ok: false, error: "No records to save" });
 
         const batch = adminDb.batch();
         const now = Date.now();
+
         for (const rec of records) {
           const ref = adminDb.collection("merchantMedia").doc();
           batch.set(ref, {
@@ -212,151 +209,155 @@ export default async function handler(req: any, res: any) {
             createdAt: now,
           });
         }
+
         await batch.commit();
         return res.status(200).json({ ok: true, saved: records.length });
-      } catch (e) {
-        return bad(res, 500, "images/save/exception", e);
       }
-    }
 
-    /* ---------- Image ops for edit drawer ---------- */
-    if (op === "imagesStage") {
-      try {
+      /* ---------- New: image edit pipeline ---------- */
+
+      // 1) return staged targets for files
+      if (op === "imagesStage") {
         const files = Array.isArray(body.files) ? body.files : [];
-        if (!files.length) return bad(res, 400, "images/stage/no-files");
+        if (!files.length) return res.status(400).json({ ok: false, error: "No files provided" });
 
         const input = files.map((f: any) => ({
           resource: "IMAGE",
           filename: String(f.filename || "image.jpg"),
           mimeType: String(f.mimeType || "image/jpeg"),
-          fileSize: String(f.fileSize ?? f.size ?? 0),
+          fileSize: String(f.fileSize),
           httpMethod: "POST",
         }));
 
-        const r = await sgql(STAGED_UPLOADS_CREATE, { input }, "imagesStage");
-        const errs = r?.data?.stagedUploadsCreate?.userErrors || [];
-        if (errs.length) return bad(res, 400, "images/stage/userErrors", new Error(errs.map((e: any) => e.message).join("; ")), { errs });
-
+        const r = await shopifyGraphQL(STAGED_UPLOADS_CREATE, { input });
+        const userErrors = r?.data?.stagedUploadsCreate?.userErrors || [];
+        if (userErrors.length) {
+          return res.status(400).json({ ok: false, error: userErrors.map((e: any) => e.message).join("; ") });
+        }
         const targets = r?.data?.stagedUploadsCreate?.stagedTargets || [];
         return res.status(200).json({ ok: true, targets });
-      } catch (e) {
-        return bad(res, 500, "images/stage/exception", e);
       }
-    }
 
-    if (op === "imagesAttach") {
-      try {
+      // 2) attach staged images and mirror urls
+      if (op === "imagesAttach") {
         const mpDocId = String(body.id || "");
         const resourceUrls: string[] = Array.isArray(body.resourceUrls) ? body.resourceUrls : [];
-        if (!mpDocId) return bad(res, 400, "images/attach/missing-id");
-        if (!resourceUrls.length) return bad(res, 400, "images/attach/no-resourceUrls");
+        if (!mpDocId) return res.status(400).json({ ok: false, error: "Missing id" });
+        if (!resourceUrls.length) return res.status(400).json({ ok: false, error: "No resourceUrls" });
 
         const ref = adminDb.collection("merchantProducts").doc(mpDocId);
         const snap = await ref.get();
-        if (!snap.exists) return bad(res, 404, "images/attach/not-found");
+        if (!snap.exists) return res.status(404).json({ ok: false, error: "Not found" });
 
         const doc = snap.data() || {};
-        if (doc.merchantId && doc.merchantId !== uid) return bad(res, 403, "images/attach/forbidden");
+        if (doc.merchantId && doc.merchantId !== uid) return res.status(403).json({ ok: false, error: "Forbidden" });
 
         const shopifyProductId: string | undefined = doc.shopifyProductId;
-        if (!shopifyProductId) return bad(res, 400, "images/attach/no-shopifyProductId");
+        if (!shopifyProductId) return res.status(400).json({ ok: false, error: "No Shopify product id" });
 
         const media = resourceUrls.map(u => ({ originalSource: u, mediaContentType: "IMAGE" as const }));
-        const attach = await sgql(PRODUCT_CREATE_MEDIA, { productId: shopifyProductId, media }, "imagesAttach");
-        const mErrs = attach?.data?.productCreateMedia?.mediaUserErrors || [];
-        if (mErrs.length) return bad(res, 400, "images/attach/mediaUserErrors", new Error(mErrs.map((e:any)=>e.message).join("; ")), { mErrs });
+        const attachRes = await shopifyGraphQL(PRODUCT_CREATE_MEDIA, { productId: shopifyProductId, media });
+        const mErrors = attachRes?.data?.productCreateMedia?.mediaUserErrors || [];
+        if (mErrors.length) {
+          return res.status(400).json({ ok: false, error: mErrors.map((e: any) => e.message).join("; ") });
+        }
 
         const { urls } = await listImageUrls(shopifyProductId);
-        await ref.set({ images: urls, image: urls[0] || null, updatedAt: Date.now() }, { merge: true });
+        const now = Date.now();
+        await ref.set({ images: urls, image: urls[0] || null, updatedAt: now }, { merge: true });
 
         return res.status(200).json({ ok: true, images: urls });
-      } catch (e) {
-        return bad(res, 500, "images/attach/exception", e);
       }
-    }
 
-    if (op === "imagesDelete") {
-      try {
+      // 3) delete selected images by URL
+      if (op === "imagesDelete") {
         const mpDocId = String(body.id || "");
         const urlsToDelete: string[] = Array.isArray(body.urls) ? body.urls : [];
-        if (!mpDocId) return bad(res, 400, "images/delete/missing-id");
-        if (!urlsToDelete.length) return bad(res, 400, "images/delete/no-urls");
+        if (!mpDocId) return res.status(400).json({ ok: false, error: "Missing id" });
+        if (!urlsToDelete.length) return res.status(400).json({ ok: false, error: "No urls" });
 
         const ref = adminDb.collection("merchantProducts").doc(mpDocId);
         const snap = await ref.get();
-        if (!snap.exists) return bad(res, 404, "images/delete/not-found");
+        if (!snap.exists) return res.status(404).json({ ok: false, error: "Not found" });
 
         const doc = snap.data() || {};
-        if (doc.merchantId && doc.merchantId !== uid) return bad(res, 403, "images/delete/forbidden");
+        if (doc.merchantId && doc.merchantId !== uid) return res.status(403).json({ ok: false, error: "Forbidden" });
 
         const shopifyProductId: string | undefined = doc.shopifyProductId;
-        if (!shopifyProductId) return bad(res, 400, "images/delete/no-shopifyProductId");
+        if (!shopifyProductId) return res.status(400).json({ ok: false, error: "No Shopify product id" });
 
         const { idsByUrl } = await listImageUrls(shopifyProductId);
 
         for (const u of urlsToDelete) {
           const imgId = idsByUrl[u];
-          if (!imgId) { log("imagesDelete: URL not found on Shopify", u); continue; }
+          if (!imgId) continue;
           try {
-            const del = await sgql(PRODUCT_IMAGE_DELETE, { id: imgId }, "imagesDelete");
+            const del = await shopifyGraphQL(PRODUCT_IMAGE_DELETE, { id: imgId });
             const errs = del?.data?.productImageDelete?.userErrors || [];
-            if (errs.length) log("productImageDelete userErrors:", errs);
+            if (errs.length) console.warn("productImageDelete errors:", errs);
           } catch (e) {
-            log("productImageDelete failed:", e);
+            console.warn("productImageDelete failed:", e);
           }
         }
 
         const refreshed = await listImageUrls(shopifyProductId);
-        await ref.set({ images: refreshed.urls, image: refreshed.urls[0] || null, updatedAt: Date.now() }, { merge: true });
+        const now = Date.now();
+        await ref.set({ images: refreshed.urls, image: refreshed.urls[0] || null, updatedAt: now }, { merge: true });
 
         return res.status(200).json({ ok: true, images: refreshed.urls });
-      } catch (e) {
-        return bad(res, 500, "images/delete/exception", e);
       }
-    }
 
-    /* ---------- Details for edit drawer ---------- */
-    if (op === "details") {
-      try {
+      /* ---------- Details for edit drawer ---------- */
+      if (op === "details") {
         const id = String(body.id || "");
-        if (!id) return bad(res, 400, "details/missing-id");
+        if (!id) return res.status(400).json({ ok: false, error: "Missing id" });
 
         const ref = adminDb.collection("merchantProducts").doc(id);
         const snap = await ref.get();
-        if (!snap.exists) return bad(res, 404, "details/not-found");
+        if (!snap.exists) return res.status(404).json({ ok: false, error: "Not found" });
 
         const doc = snap.data() || {};
-        if (doc.merchantId && doc.merchantId !== uid) return bad(res, 403, "details/forbidden");
+        if (doc.merchantId && doc.merchantId !== uid) {
+          return res.status(403).json({ ok: false, error: "Forbidden" });
+        }
 
         let productOptions: any[] = [];
         let variants: any[] = [];
         let imagesLive: string[] = [];
 
         if (doc.shopifyProductId) {
-          const r = await sgql(PRODUCT_DETAILS_QUERY, { id: doc.shopifyProductId }, "details");
-          const p = r?.data?.product;
+          try {
+            const r = await shopifyGraphQL(PRODUCT_DETAILS_QUERY, { id: doc.shopifyProductId });
+            const p = r?.data?.product;
 
-          if (p) {
-            productOptions = (p.options || []).map((o: any) => ({
-              name: o.name || "",
-              values: Array.isArray(o.values) ? o.values.filter((v: any) => typeof v === "string") : [],
-            }));
+            if (p) {
+              productOptions = (p.options || []).map((o: any) => ({
+                name: o.name || "",
+                values: Array.isArray(o.values) ? o.values.filter((v: any) => typeof v === "string") : [],
+              }));
 
-            variants = (p.variants?.nodes || []).map((v: any) => {
-              const opts = Array.isArray(v.selectedOptions) ? v.selectedOptions.map((so: any) => String(so.value)) : [];
-              return {
-                id: v.id,
-                title: v.title,
-                optionValues: opts,
-                price: v.price != null ? Number(v.price) : undefined,
-                quantity: typeof v.inventoryQuantity === "number" ? v.inventoryQuantity : undefined,
-                sku: v.sku || undefined,
-                barcode: v.barcode || undefined,
-                // weightGrams omitted (field removed in your API version)
-              };
+              variants = (p.variants?.nodes || []).map((v: any) => {
+                const opts = Array.isArray(v.selectedOptions) ? v.selectedOptions.map((so: any) => String(so.value)) : [];
+                return {
+                  id: v.id,
+                  title: v.title,
+                  optionValues: opts,
+                  price: v.price != null ? Number(v.price) : undefined,
+                  quantity: typeof v.inventoryQuantity === "number" ? v.inventoryQuantity : undefined,
+                  sku: v.sku || undefined,
+                  barcode: v.barcode || undefined,
+                };
+              });
+
+              imagesLive = (p.images?.nodes || []).map((n: any) => String(n.url)).filter(Boolean);
+            }
+          } catch (err: any) {
+            console.error("[details:product]", err?.response?.errors || err?.message || err);
+            return res.status(500).json({
+              ok: false,
+              code: "details/exception",
+              error: `[details:product] ${JSON.stringify(err?.response || err)}`
             });
-
-            imagesLive = (p.images?.nodes || []).map((n: any) => String(n.url)).filter(Boolean);
           }
         }
 
@@ -364,32 +365,76 @@ export default async function handler(req: any, res: any) {
           ok: true,
           product: { id: snap.id, ...doc, productOptions, variants, imagesLive },
         });
-      } catch (e) {
-        return bad(res, 500, "details/exception", e);
       }
-    }
 
-    /* ---------- Default: product update (quick + review) ---------- */
-    try {
+      /* ---------- Safe delete with typed-SKU confirmation ---------- */
+      if (op === "delete") {
+        const id = String(body.id || "");
+        const typedSku = String(body.typedSku || "");
+        if (!id || !typedSku) return res.status(400).json({ ok: false, error: "Missing id or typedSku" });
+
+        const ref = adminDb.collection("merchantProducts").doc(id);
+        const snap = await ref.get();
+        if (!snap.exists) return res.status(404).json({ ok: false, error: "Not found" });
+
+        const doc = snap.data() || {};
+        if (doc.merchantId && doc.merchantId !== uid) {
+          return res.status(403).json({ ok: false, error: "Forbidden" });
+        }
+
+        const sku = normSku(String(doc.sku || ""));
+        if (!sku || normSku(typedSku) !== sku) {
+          return res.status(400).json({ ok: false, error: "SKU mismatch" });
+        }
+
+        const shopifyProductId: string | undefined = doc.shopifyProductId;
+
+        // Best effort: delete in Shopify (hard delete), else at least archive later if needed
+        if (shopifyProductId) {
+          try {
+            const r = await shopifyGraphQL(PRODUCT_DELETE, { input: { id: shopifyProductId } });
+            const uerr = r?.data?.productDelete?.userErrors || [];
+            if (uerr.length) console.warn("productDelete userErrors:", uerr);
+          } catch (e) {
+            console.warn("productDelete failed:", e);
+          }
+        }
+
+        // Release SKU claim so vendor can reuse it later
+        const claimRef = adminDb.collection("skuClaims").doc(skuClaimId(uid, sku));
+        await claimRef.delete().catch(() => {});
+
+        // Soft delete doc (or use ref.delete() if you prefer hard delete)
+        await ref.set(
+          { status: "deleted", deletedAt: Date.now() },
+          { merge: true }
+        );
+
+        return res.status(200).json({ ok: true, deleted: true });
+      }
+
+      /* ---------- Default: product update (quick + review) ---------- */
       const { id } = body;
-      if (!id) return bad(res, 400, "update/missing-id");
+      if (!id) return res.status(400).json({ ok: false, error: "Missing id" });
 
       const ref = adminDb.collection("merchantProducts").doc(id);
       const snap = await ref.get();
-      if (!snap.exists) return bad(res, 404, "update/not-found");
+      if (!snap.exists) return res.status(404).json({ ok: false, error: "Not found" });
 
       const doc = snap.data() || {};
-      if (doc.merchantId && doc.merchantId !== uid) return bad(res, 403, "update/forbidden");
+      if (doc.merchantId && doc.merchantId !== uid) {
+        return res.status(403).json({ ok: false, error: "Forbidden" });
+      }
 
       const shopifyProductId: string | undefined = doc.shopifyProductId;
-      const defaultVariantId: string | undefined =
-        Array.isArray(doc.shopifyVariantIds) ? doc.shopifyVariantIds[0] : (doc.shopifyVariantId || undefined);
+      const defaultVariantId: string | undefined = Array.isArray(doc.shopifyVariantIds) ? doc.shopifyVariantIds[0] : undefined;
 
       const updates: any = { updatedAt: Date.now() };
       let adminNeedsReview = false;
 
       // ----- quick (price / stock) -----
       const quick = body.quick && typeof body.quick === "object" ? body.quick : {};
+
       if (body.price != null && body.price !== "" && quick.price == null) quick.price = body.price;
       if (body.stockQty != null && body.stockQty !== "" && quick.quantity == null) quick.quantity = body.stockQty;
 
@@ -412,9 +457,12 @@ export default async function handler(req: any, res: any) {
       }
 
       if (variantsPayload.length && shopifyProductId) {
-        const updateRes = await sgql(VARIANTS_BULK_UPDATE, { productId: shopifyProductId, variants: variantsPayload }, "update/variants");
+        const updateRes = await shopifyGraphQL(VARIANTS_BULK_UPDATE, { productId: shopifyProductId, variants: variantsPayload });
         const errors = updateRes?.data?.productVariantsBulkUpdate?.userErrors || [];
-        if (errors.length) return bad(res, 400, "update/variants/userErrors", new Error(errors.map((e:any)=>e.message).join("; ")), { errors });
+        if (errors.length) {
+          const msg = errors.map((e: any) => e.message).join("; ");
+          return res.status(400).json({ ok: false, error: msg || "Failed to update variants on Shopify" });
+        }
       }
 
       if (quickPrice != null && !Number.isNaN(quickPrice)) updates.price = quickPrice;
@@ -426,15 +474,13 @@ export default async function handler(req: any, res: any) {
         const inventoryItemId: string | undefined = doc.inventoryItemId;
         if (locationId && inventoryItemId) {
           try {
-            const invRes = await sgql(
-              INVENTORY_SET_ON_HAND,
-              { input: { reason: "correction", setQuantities: [{ inventoryItemId, locationId, quantity: quickQty }] } },
-              "update/inventory"
-            );
+            const invRes = await shopifyGraphQL(INVENTORY_SET_ON_HAND, {
+              input: { reason: "correction", setQuantities: [{ inventoryItemId, locationId, quantity: quickQty }] },
+            });
             const invErrors = invRes?.data?.inventorySetOnHandQuantities?.userErrors || [];
-            if (invErrors.length) log("inventorySetOnHandQuantities userErrors:", invErrors);
+            if (invErrors.length) console.warn("inventorySetOnHandQuantities errors:", invErrors);
           } catch (e) {
-            log("inventorySetOnHandQuantities failed:", e);
+            console.warn("inventorySetOnHandQuantities failed:", e);
           }
         }
       }
@@ -455,6 +501,7 @@ export default async function handler(req: any, res: any) {
       ] as const;
 
       for (const f of reviewFields) if (changes[f] !== undefined) changedForReview[f] = changes[f];
+
       const variantDraft = body.variantDraft !== undefined ? body.variantDraft : changes.variantDraft;
       if (variantDraft !== undefined) changedForReview.variantDraft = variantDraft;
 
@@ -476,13 +523,11 @@ export default async function handler(req: any, res: any) {
           ? "Updated live on Shopify."
           : "No changes detected.",
       });
-    } catch (e) {
-      return bad(res, 500, "update/exception", e);
     }
+
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
   } catch (e: any) {
-    console.error("update endpoint fatal:", e?.message || e);
-    return bad(res, 500, "fatal", e);
-  } finally {
-    log("done in", Date.now() - started, "ms");
+    console.error("update endpoint error:", e?.message || e);
+    return res.status(500).json({ ok: false, error: e?.message || "Internal error" });
   }
 }
