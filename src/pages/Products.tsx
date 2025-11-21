@@ -1036,7 +1036,7 @@ export default function Products() {
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">
-                  If variants are provided, the server will keep the Shopify product in <b>Draft</b> and mark it <b>In review</b>.
+                  If variants are provided, the server will send the product for <b>Review</b> and mark it's status as <b>In review</b>.
                 </p>
               </div>
 
@@ -1373,7 +1373,7 @@ export default function Products() {
                     </div>
                   )}
                   <p className="text-xs text-muted-foreground mt-2">
-                    Editing price/stock above updates Shopify instantly. Removing variants and any other changes go to admin for review.
+                    Editing price/stock above updates Store instantly. Removing variants and any other changes go to admin for review.
                   </p>
                 </div>
 
@@ -1420,7 +1420,7 @@ export default function Products() {
                   <div><span className="font-medium">SKU:</span> {deleteTarget.sku || "—"}</div>
                 </div>
                 <p className="text-sm">
-                  Type the SKU exactly to confirm deletion. This will remove the product in Shopify and mark it deleted here.
+                  Type the SKU exactly to confirm deletion. This will remove the product from Drippr Store and mark it deleted here.
                 </p>
                 <div className="space-y-2">
                   <Label>Confirm by typing SKU</Label>
@@ -1458,7 +1458,7 @@ export default function Products() {
                   disabled={bulkRunning}
                 />
                 <p className="text-xs text-muted-foreground">
-                  Use the provided template. The first sheet’s first row must be headers.
+                  Use the provided template that you can <a href="https://docs.google.com/spreadsheets/d/1OILveQzejRd25dJMISK2-7uENt5Wt33h/edit?usp=drive_link&ouid=102184731311255601911&rtpof=true&sd=true" className="text-blue-500" target="_blank">download from here</a>. The first sheet’s first row must be headers.
                 </p>
               </div>
 
@@ -1696,7 +1696,7 @@ function VariantPlanner(props: {
             </table>
           </div>
           <p className="text-xs text-muted-foreground">
-            These are <b>proposed additions</b>. Admin will create real Shopify variants based on this plan.
+            These are <b>proposed additions</b>. Admin will review them before they go live.
           </p>
         </div>
       )}
