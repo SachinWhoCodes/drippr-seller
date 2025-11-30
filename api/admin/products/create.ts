@@ -1,73 +1,47 @@
-// api/admin/products/create.ts
+// pages/api/admin/products/create.ts
 import { getAdmin } from "../../_lib/firebaseAdmin.js";
 import { shopifyGraphQL } from "../../_lib/shopify.js";
 import { nanoid } from "nanoid";
 
-/* ---------------- GraphQL ---------------- */
+/* ---------------- Shopify GQL ---------------- */
 
-// Create product and (optionally) attach images
 const PRODUCT_CREATE = /* GraphQL */ `
   mutation productCreate($product: ProductCreateInput!, $media: [CreateMediaInput!]) {
     productCreate(product: $product, media: $media) {
-      product { id title handle status variants(first: 5) { nodes { id inventoryItem { id } } } }
+      product {
+        id
+        handle
+        title
+        status
+        variants(first: 5) {
+          nodes { id inventoryItem { id } }
+        }
+        images(first: 20) { nodes { url } }
+      }
       userErrors { field message }
     }
   }
 `;
 
-// Update default variant (price / compareAt / barcode / inventoryItem.*)
-const VARIANTS_BULK_UPDATE = /* GraphQL */ `
-  mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-    productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-      productVariants { id }
-      userErrors { field message }
-    }
-  }
-`;
-
-// Read product images (CDN)
 const PRODUCT_IMAGES_QUERY = /* GraphQL */ `
   query productImages($id: ID!) {
     product(id: $id) {
       id
-      images(first: 100) {
-        nodes { id url }
-      }
+      images(first: 100) { nodes { url } }
     }
   }
 `;
 
-/* ---------------- Helpers ---------------- */
-
-function sleep(ms: number) { return new Promise(res => setTimeout(res, ms)); }
+export const config = { api: { bodyParser: { sizeLimit: "10mb" } } };
 
 async function listImageUrls(productId: string): Promise<string[]> {
   const r = await shopifyGraphQL(PRODUCT_IMAGES_QUERY, { id: productId });
   const nodes = r?.data?.product?.images?.nodes || [];
-  return nodes.map((n: any) => String(n?.url)).filter(Boolean);
+  return nodes.map((n: any) => String(n.url)).filter(Boolean);
 }
-
-/**
- * Poll Shopify until at least `minExpected` images are visible on CDN,
- * or until timeout is reached. Returns whatever is visible at the end.
- */
-async function waitForShopifyImages(productId: string, minExpected: number, timeoutMs = 15000, intervalMs = 1000) {
-  const start = Date.now();
-  let urls: string[] = [];
-  do {
-    urls = await listImageUrls(productId);
-    if (urls.length >= minExpected) return urls;
-    await sleep(intervalMs);
-  } while (Date.now() - start < timeoutMs);
-  return urls; // best-effort
-}
-
-/* ---------------- Handler ---------------- */
 
 export default async function handler(req: any, res: any) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
-  }
+  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Method not allowed" });
 
   try {
     const { adminAuth, adminDb } = getAdmin();
@@ -77,9 +51,8 @@ export default async function handler(req: any, res: any) {
     const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
     if (!token) return res.status(401).json({ ok: false, error: "Missing Authorization" });
     const decoded = await adminAuth.verifyIdToken(token);
-    const merchantId = decoded.uid;
+    const merchantId = decoded.uid as string;
 
-    // --- input ---
     const body = req.body || {};
     const {
       title,
@@ -91,7 +64,7 @@ export default async function handler(req: any, res: any) {
       inventory = {},
       currency = "INR",
       tags = [],
-      resourceUrls = [],        // staged resource URLs from client
+      resourceUrls = [],        // <- staged resource URLs from client (optional)
       vendor,
       productType,
       status,
@@ -103,11 +76,8 @@ export default async function handler(req: any, res: any) {
       return res.status(400).json({ ok: false, error: "title and price are required" });
     }
 
-    // --- Shopify side tagging / status ---
     const merchantProductId = `mp_${nanoid(10)}`;
     const shopifyTags = [...new Set([`merchant:${merchantId}`, ...tags])];
-
-    // If seller provided variant plan, keep product as Draft
     const shopifyStatus = variantDraft ? "DRAFT" : (status ? String(status).toUpperCase() : undefined);
 
     const productInput = {
@@ -120,6 +90,8 @@ export default async function handler(req: any, res: any) {
       tags: shopifyTags,
     };
 
+    // When sending `media` with productCreate, Shopify attaches them and will
+    // generate permanent CDN URLs shortly after.
     const mediaInput =
       Array.isArray(resourceUrls) && resourceUrls.length
         ? resourceUrls.slice(0, 10).map((u: string) => ({
@@ -128,44 +100,32 @@ export default async function handler(req: any, res: any) {
           }))
         : undefined;
 
-    // 1) Create product (and attach staged images if provided)
     const createRes = await shopifyGraphQL(PRODUCT_CREATE, { product: productInput, media: mediaInput });
-    const userErrors = createRes?.data?.productCreate?.userErrors || [];
-    if (userErrors.length) {
-      return res.status(400).json({ ok: false, error: userErrors.map((e: any) => e.message).join("; ") });
+    const uerr = createRes?.data?.productCreate?.userErrors || [];
+    if (uerr.length) {
+      return res.status(400).json({ ok: false, error: uerr.map((e: any) => e.message).join("; ") });
     }
 
     const product = createRes.data.productCreate.product;
     const firstVariant = product?.variants?.nodes?.[0];
-    if (!product?.id || !firstVariant?.id) throw new Error("Product created but default variant not returned.");
+    if (!product?.id || !firstVariant?.id) throw new Error("Product created but variant missing");
 
-    // 2) Update default variant fields
-    const variantsPayload: any[] = [{
-      id: firstVariant.id,
-      price: String(price),
-      ...(compareAtPrice != null ? { compareAtPrice: String(compareAtPrice) } : {}),
-      ...(barcode ? { barcode } : {}),
-      inventoryItem: {
-        sku: merchantProductId,
-        ...(typeof inventory.tracked === "boolean" ? { tracked: Boolean(inventory.tracked) } : {}),
-        ...(inventory?.cost != null && inventory.cost !== "" ? { cost: String(inventory.cost) } : {}),
-      },
-    }];
+    // ===== IMPORTANT: mirror PERMANENT CDN URLs, never staged resourceUrl =====
+    // Try to use images returned by productCreate; if empty, query once.
+    let cdnUrls: string[] =
+      (product.images?.nodes || []).map((n: any) => String(n.url)).filter(Boolean);
 
-    const updateRes = await shopifyGraphQL(VARIANTS_BULK_UPDATE, { productId: product.id, variants: variantsPayload });
-    const vErrors = updateRes?.data?.productVariantsBulkUpdate?.userErrors || [];
-    if (vErrors.length) console.warn("productVariantsBulkUpdate errors:", vErrors);
+    if (!cdnUrls.length) {
+      // Small lag can happen; one follow-up query is enough.
+      cdnUrls = await listImageUrls(product.id);
+    }
 
-    // 3) IMPORTANT: Wait for Shopify to finish processing media, then read CDN URLs
-    const expectedImages = Array.isArray(mediaInput) ? mediaInput.length : 0;
-    const cdnUrls = expectedImages ? await waitForShopifyImages(product.id, expectedImages) : [];
-
-    // 4) Mirror in Firestore with CDN URLs (never write staged URLs)
+    // ===== Mirror to Firestore =====
     const now = Date.now();
     const docRef = adminDb.collection("merchantProducts").doc();
-    const numericVariantId = String(firstVariant.id).split("/").pop();
 
-    const sellerStatus = "pending"; // your current logic
+    const numericVariantId = String(firstVariant.id).split("/").pop();
+    const sellerStatus = "pending"; // unchanged behavior: admin review flow
 
     await docRef.set({
       id: docRef.id,
@@ -182,9 +142,12 @@ export default async function handler(req: any, res: any) {
       shopifyVariantIds: [firstVariant.id],
       shopifyVariantNumericIds: [numericVariantId],
       tags: shopifyTags,
+
+      // Save ONLY CDN permanent URLs
       image: cdnUrls[0] || null,
       images: cdnUrls,
-      imageUrls: cdnUrls, // keep legacy key but use CDN
+      imageUrls: cdnUrls,              // backward-compat field you were using
+
       stock: inventory?.quantity ?? null,
       vendor: vendor || "DRIPPR Marketplace",
       productType: productType || null,
