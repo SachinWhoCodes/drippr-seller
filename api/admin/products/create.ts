@@ -1,47 +1,67 @@
-// pages/api/admin/products/create.ts
+// api/admin/products/create.ts 2
 import { getAdmin } from "../../_lib/firebaseAdmin.js";
 import { shopifyGraphQL } from "../../_lib/shopify.js";
 import { nanoid } from "nanoid";
 
-/* ---------------- Shopify GQL ---------------- */
+function normSku(raw: string): string {
+  return String(raw || "").trim().toUpperCase().replace(/\s+/g, "-");
+}
+function skuClaimId(uid: string, sku: string) {
+  return `${uid}__${normSku(sku)}`;
+}
 
+// 1) Create product and (optionally) attach images
 const PRODUCT_CREATE = /* GraphQL */ `
   mutation productCreate($product: ProductCreateInput!, $media: [CreateMediaInput!]) {
     productCreate(product: $product, media: $media) {
       product {
         id
-        handle
         title
+        handle
         status
-        variants(first: 5) {
-          nodes { id inventoryItem { id } }
+        media(first: 10) {
+          edges {
+            node {
+              mediaContentType
+              ... on MediaImage {
+                id
+                image {
+                  url
+                  altText
+                }
+              }
+            }
+          }
         }
-        images(first: 20) { nodes { url } }
+        variants(first: 5) {
+          nodes {
+            id
+            inventoryItem { id }
+          }
+        }
       }
       userErrors { field message }
     }
   }
 `;
 
-const PRODUCT_IMAGES_QUERY = /* GraphQL */ `
-  query productImages($id: ID!) {
-    product(id: $id) {
-      id
-      images(first: 100) { nodes { url } }
+
+// 2) Update default variant (price, compareAtPrice, barcode, inventoryItem.*)
+const VARIANTS_BULK_UPDATE = /* GraphQL */ `
+  mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+    productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+      productVariants { id }
+      userErrors { field message }
     }
   }
 `;
 
-export const config = { api: { bodyParser: { sizeLimit: "10mb" } } };
-
-async function listImageUrls(productId: string): Promise<string[]> {
-  const r = await shopifyGraphQL(PRODUCT_IMAGES_QUERY, { id: productId });
-  const nodes = r?.data?.product?.images?.nodes || [];
-  return nodes.map((n: any) => String(n.url)).filter(Boolean);
-}
-
 export default async function handler(req: any, res: any) {
-  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Method not allowed" });
+  if (req.method !== "POST") {
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
+  }
+
+  let claimedSkuRef: FirebaseFirestore.DocumentReference | null = null;
 
   try {
     const { adminAuth, adminDb } = getAdmin();
@@ -51,34 +71,41 @@ export default async function handler(req: any, res: any) {
     const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
     if (!token) return res.status(401).json({ ok: false, error: "Missing Authorization" });
     const decoded = await adminAuth.verifyIdToken(token);
-    const merchantId = decoded.uid as string;
+    const merchantId = decoded.uid;
 
+    // --- input from the React form ---
     const body = req.body || {};
     const {
       title,
       description,
       price,
-      compareAtPrice,
+      compareAtPrice, // mandatory per your request
       barcode,
       weightGrams,
-      inventory = {},
+      inventory = {},          // { quantity?, tracked?, cost? }  -> quantity mandatory in UI
       currency = "INR",
       tags = [],
-      resourceUrls = [],        // <- staged resource URLs from client (optional)
-      vendor,
+      resourceUrls = [],
+      vendor,                  // mandatory per your request
       productType,
       status,
-      seo,
+      seo,                     // mandatory in UI
+      sku: rawSku,             // mandatory per your request
       variantDraft,
     } = body;
 
-    if (!title || price == null) {
-      return res.status(400).json({ ok: false, error: "title and price are required" });
+    if (!title || price == null || !vendor || !rawSku || compareAtPrice == null) {
+      return res.status(400).json({ ok: false, error: "title, price, vendor, sku and compareAtPrice are required" });
     }
+    const sku = normSku(rawSku);
 
-    const merchantProductId = `mp_${nanoid(10)}`;
+    // --- Shopify side tagging / status ---
+    const merchantProductId = `mp_${nanoid(10)}`; // internal trace id if you still want it
     const shopifyTags = [...new Set([`merchant:${merchantId}`, ...tags])];
-    const shopifyStatus = variantDraft ? "DRAFT" : (status ? String(status).toUpperCase() : undefined);
+
+    const shopifyStatus = variantDraft
+      ? "DRAFT"
+      : (status ? String(status).toUpperCase() : undefined); // ACTIVE | DRAFT | ARCHIVED
 
     const productInput = {
       title,
@@ -90,8 +117,6 @@ export default async function handler(req: any, res: any) {
       tags: shopifyTags,
     };
 
-    // When sending `media` with productCreate, Shopify attaches them and will
-    // generate permanent CDN URLs shortly after.
     const mediaInput =
       Array.isArray(resourceUrls) && resourceUrls.length
         ? resourceUrls.slice(0, 10).map((u: string) => ({
@@ -100,73 +125,111 @@ export default async function handler(req: any, res: any) {
           }))
         : undefined;
 
+    // --- SKU claim (per-vendor uniqueness) ---
+    const docRef = adminDb.collection("merchantProducts").doc();
+    const claimRef = adminDb.collection("skuClaims").doc(skuClaimId(merchantId, sku));
+    try {
+      await claimRef.create({ merchantId, productDocId: docRef.id, createdAt: Date.now() });
+      claimedSkuRef = claimRef;
+    } catch {
+      return res.status(409).json({ ok: false, error: "SKU already used by you" });
+    }
+
+    // --- 1) create product on Shopify ---
     const createRes = await shopifyGraphQL(PRODUCT_CREATE, { product: productInput, media: mediaInput });
-    const uerr = createRes?.data?.productCreate?.userErrors || [];
-    if (uerr.length) {
-      return res.status(400).json({ ok: false, error: uerr.map((e: any) => e.message).join("; ") });
+    const userErrors = createRes.data?.productCreate?.userErrors || [];
+    if (userErrors.length) {
+      return res.status(400).json({ ok: false, error: userErrors.map((e: any) => e.message).join("; ") });
     }
 
     const product = createRes.data.productCreate.product;
     const firstVariant = product?.variants?.nodes?.[0];
-    if (!product?.id || !firstVariant?.id) throw new Error("Product created but variant missing");
-
-    // ===== IMPORTANT: mirror PERMANENT CDN URLs, never staged resourceUrl =====
-    // Try to use images returned by productCreate; if empty, query once.
-    let cdnUrls: string[] =
-      (product.images?.nodes || []).map((n: any) => String(n.url)).filter(Boolean);
-
-    if (!cdnUrls.length) {
-      // Small lag can happen; one follow-up query is enough.
-      cdnUrls = await listImageUrls(product.id);
+    if (!product?.id || !firstVariant?.id) {
+      throw new Error("Product created but default variant not returned.");
     }
 
-    // ===== Mirror to Firestore =====
-    const now = Date.now();
-    const docRef = adminDb.collection("merchantProducts").doc();
+    // --- extract Shopify CDN image URLs ---
+	const mediaEdges = product?.media?.edges || [];
 
+	const cdnImages: string[] = mediaEdges
+	  .map((edge: any) => edge?.node?.image?.url)
+	  .filter((u: any) => typeof u === "string" && u.length > 0);
+
+	// Fallback to original resourceUrls if for some reason media isn't ready yet
+	const images = cdnImages.length
+	  ? cdnImages
+	  : (Array.isArray(resourceUrls) ? resourceUrls : []);
+
+	const image = images[0] || null;
+    
+    // --- 2) update default Shopify variant with feasible fields ---
+    const variantsPayload: any[] = [
+      {
+        id: firstVariant.id,
+        price: String(price),
+        ...(compareAtPrice != null ? { compareAtPrice: String(compareAtPrice) } : {}),
+        ...(barcode ? { barcode } : {}),
+        inventoryItem: {
+          sku, // <-- write vendor-provided SKU
+          ...(typeof inventory.tracked === "boolean" ? { tracked: Boolean(inventory.tracked) } : {}),
+          ...(inventory?.cost != null && inventory.cost !== "" ? { cost: String(inventory.cost) } : {}),
+        },
+      },
+    ];
+
+    const updateRes = await shopifyGraphQL(VARIANTS_BULK_UPDATE, {
+      productId: product.id,
+      variants: variantsPayload,
+    });
+    const vErrors = updateRes.data?.productVariantsBulkUpdate?.userErrors || [];
+    if (vErrors.length) console.warn("productVariantsBulkUpdate errors:", vErrors);
+
+    const now = Date.now();
     const numericVariantId = String(firstVariant.id).split("/").pop();
-    const sellerStatus = "pending"; // unchanged behavior: admin review flow
+
+
+    // Your seller-facing status: keep "pending" so admin can configure variants
+    const sellerStatus = "pending";
 
     await docRef.set({
-      id: docRef.id,
-      merchantId,
-      title,
-      description: description || "",
-      price: Number(price),
-      currency,
-      status: sellerStatus,
-      published: false,
-      sku: merchantProductId,
-      shopifyProductId: product.id,
-      shopifyProductNumericId: String(product.id).split("/").pop(),
-      shopifyVariantIds: [firstVariant.id],
-      shopifyVariantNumericIds: [numericVariantId],
-      tags: shopifyTags,
-
-      // Save ONLY CDN permanent URLs
-      image: cdnUrls[0] || null,
-      images: cdnUrls,
-      imageUrls: cdnUrls,              // backward-compat field you were using
-
-      stock: inventory?.quantity ?? null,
-      vendor: vendor || "DRIPPR Marketplace",
-      productType: productType || null,
-      variantDraft: variantDraft || null,
-      adminNotes: null,
-      createdAt: now,
-      updatedAt: now,
-    });
+  id: docRef.id,
+  merchantId,
+  title,
+  description: description || "",
+  price: Number(price),
+  currency,
+  status: sellerStatus,
+  published: false,
+  sku,
+  shopifyProductId: product.id,
+  shopifyProductNumericId: String(product.id).split("/").pop(),
+  shopifyVariantIds: [firstVariant.id],
+  shopifyVariantNumericIds: [numericVariantId],
+  tags: shopifyTags,
+  image,          // <-- now a Shopify CDN URL
+  images,         // <-- array of CDN URLs
+  imageUrls: images,
+  stock: inventory?.quantity ?? null,
+  vendor: vendor || "DRIPPR Marketplace",
+  productType: productType || null,
+  variantDraft: variantDraft || null,
+  adminNotes: null,
+  createdAt: now,
+  updatedAt: now,
+});
 
     return res.status(200).json({
       ok: true,
       productId: product.id,
       variantId: firstVariant.id,
+      merchantProductId,       // internal trace
       firestoreId: docRef.id,
       inReview: Boolean(variantDraft),
     });
   } catch (e: any) {
+    // release claimed SKU if we grabbed it
+    try { if (claimedSkuRef) await claimedSkuRef.delete(); } catch {}
     console.error("create product error:", e?.message || e);
     return res.status(500).json({ ok: false, error: e?.message || "Internal error" });
   }
 }
-
