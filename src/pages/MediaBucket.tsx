@@ -123,7 +123,7 @@ export default function MediaBucket() {
     const qy = query(
       collection(db, "merchantMedia"),
       where("merchantId", "==", uid),
-      // you can add orderBy("createdAt", "desc") later once index exists
+      orderBy("createdAt", "desc"),
       limit(200)
     );
 
