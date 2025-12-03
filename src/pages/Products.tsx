@@ -86,6 +86,8 @@ export default function Products() {
   const [selectedImages, setSelectedImages] = useState<File[]>([]);
   const [imagePreviews, setImagePreviews] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
+  const [handleDeliveryCharge, setHandleDeliveryCharge] = useState(false);
+  const [basePriceInput, setBasePriceInput] = useState<string>(""); 
 
   // shadcn <Select> values (controlled)
   const [trackInventory, setTrackInventory] = useState<"yes" | "no">("yes");
@@ -284,7 +286,9 @@ export default function Products() {
     const title = String(form.get("title") || "").trim();
     const description = String(form.get("description") || "").trim();
 
-    const price = Number(form.get("price") || 0);
+    const rawPrice = basePriceInput !== "" ? basePriceInput : String(form.get("price") ?? "0");
+    const parsedPrice = Number(rawPrice || 0);
+    const price = Number.isFinite(parsedPrice) ? parsedPrice + (handleDeliveryCharge ? 100 : 0) : 0;
     const compareAtPriceRaw = String(form.get("compare-price") ?? "");
     const compareAtPrice = compareAtPriceRaw === "" ? NaN : Number(compareAtPriceRaw);
     const cost = Number(form.get("cost") || 0) || undefined;
@@ -922,7 +926,38 @@ export default function Products() {
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label htmlFor="price">Base Price (₹) *</Label>
-                  <Input id="price" name="price" type="number" placeholder="999" min={0} step="0.01" required />
+                  <Input
+                    id="price"
+                    name="price"
+                    type="number"
+                    placeholder="999"
+                    min={0}
+                    step="0.01"
+                    required
+                    value={basePriceInput}
+                    onChange={(e) => setBasePriceInput(e.target.value)}
+                  />
+
+                  {/* DELIVERY CHARGE CHECKBOX */}
+                  <label className="inline-flex items-center gap-2 mt-2">
+                    <input
+                      type="checkbox"
+                      checked={handleDeliveryCharge}
+                      onChange={(e) => setHandleDeliveryCharge(e.target.checked)}
+                      className="h-4 w-4"
+                    />
+                    <span className="text-sm">Handle the delivery charge to the customer</span>
+                  </label>
+
+                  {/* FINAL BASE PRICE DISPLAY */}
+                  <div className="mt-2 text-sm">
+                    <span className="text-muted-foreground">Final base price: </span>
+                    <span className="font-medium">
+                      {/* compute final price for display (treat empty as 0) */}
+                      ₹{(Number(basePriceInput || 0) + (handleDeliveryCharge ? 100 : 0)).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 })}
+                    </span>
+                    <span className="ml-2 text-xs text-muted-foreground">({handleDeliveryCharge ? "+₹100 delivery" : "no delivery added"})</span>
+                  </div>
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="compare-price">Compare at Price (₹) <span className="text-destructive">*</span></Label>
@@ -1269,11 +1304,11 @@ export default function Products() {
                   <h3 className="font-semibold">Product Images (live)</h3>
 
                   <div className="flex items-center gap-2">
-                    <label className="inline-flex items-center gap-2 px-3 py-2 border rounded-md cursor-pointer">
+                    <Label className="inline-flex items-center gap-2 px-3 py-2 border rounded-md cursor-pointer">
                       <ImagePlus className="h-4 w-4" />
                       <span>Choose files</span>
                       <input type="file" accept="image/*" multiple className="hidden" onChange={onEditChooseImages} />
-                    </label>
+                    </Label>
                     <Button type="button" onClick={onEditAttachImages} disabled={imageBusy || imageAddFiles.length === 0}>
                       {imageBusy ? "Adding…" : `Add selected images (${imageAddFiles.length})`}
                     </Button>
