@@ -86,7 +86,7 @@ export default function Products() {
   const [selectedImages, setSelectedImages] = useState<File[]>([]);
   const [imagePreviews, setImagePreviews] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
-  const [handleDeliveryCharge, setHandleDeliveryCharge] = useState(false);
+  const [handleDeliveryCharge, setHandleDeliveryCharge] = useState(true);
   const [basePriceInput, setBasePriceInput] = useState<string>(""); 
 
   // shadcn <Select> values (controlled)
@@ -385,6 +385,7 @@ export default function Products() {
 
       toast.success("Product submitted for review. Admin will configure variants & publish.");
       setIsAddProductOpen(false);
+      setHandleDeliveryCharge(true);
       setSelectedImages([]);
       setImagePreviews([]);
       (e.target as HTMLFormElement).reset();
