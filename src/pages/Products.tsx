@@ -730,6 +730,13 @@ export default function Products() {
       .map((t) => t.trim())
       .filter(Boolean);
   }
+  function boolFromCell(v: any, defaultVal = true) {
+    const s = String(v ?? "").trim().toLowerCase();
+    if (!s) return defaultVal;
+    if (["yes", "y", "true", "1"].includes(s)) return true;
+    if (["no", "n", "false", "0"].includes(s)) return false;
+    return defaultVal;
+  }
   function buildVariantDraft(row: any) {
     const o1n = row["option1name"] || row["option_1_name"];
     const o1v = row["option1values"] || row["option_1_values"];
@@ -765,9 +772,12 @@ export default function Products() {
     for (const [k, v] of Object.entries(row)) map[norm(k)] = v;
 
     const title = String(map["title"] ?? "").trim();
-    const description = String(map["description"] ?? "").trim();
-    const price = num(map["price"]);
-    if (!title || price == null) throw new Error("Missing Title or Price");
+    const basePrice = num(map["price"]);                // treat as base price
+    if (!title || basePrice == null) throw new Error("Missing Title or Price");
+
+    // NEW: delivery charge flag (defaults to true, like the Add form)
+    const handleDelivery = boolFromCell(map["handledeliverycharge"], true);
+    const price = basePrice + (handleDelivery ? 100 : 0);
 
     const compareAtPrice = num(map["compareatprice"]);
     const cost = num(map["cost"]);
@@ -787,8 +797,8 @@ export default function Products() {
 
     return {
       title,
-      description,
-      price,
+      description: String(map["description"] ?? "").trim(),
+      price,                    // <- final price with delivery logic applied
       compareAtPrice,
       barcode,
       weightGrams,
