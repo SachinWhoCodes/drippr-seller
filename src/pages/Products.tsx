@@ -1161,7 +1161,7 @@ setDraftProductType("");
                       onChange={(e) => setHandleDeliveryCharge(e.target.checked)}
                       className="h-4 w-4"
                     />
-                    <span className="text-sm">Handle the delivery charge to the customer</span>
+                    <span className="text-sm">Pass the delivery charge to the customer</span>
                   </label>
 
                   {/* FINAL BASE PRICE DISPLAY */}
@@ -1250,7 +1250,7 @@ setDraftProductType("");
                 <div className="space-y-2">
                   <Label htmlFor="product-type">Product Type</Label>
                   <Input 
-      id="product-type" name="product-type" placeholder="T-Shirts" 
+      id="product-type" required name="product-type" placeholder="T-Shirts" 
       value={draftProductType} onChange={(e) => setDraftProductType(e.target.value)}
     />
                 </div>
@@ -1292,7 +1292,7 @@ setDraftProductType("");
                 <div className="space-y-2">
                   <Label htmlFor="seo-title">SEO Title</Label>
                   <Input 
-      id="seo-title" name="seo-title" placeholder="..." required 
+      id="seo-title" name="seo-title" placeholder="Effective SEO Title..." required 
       value={draftSeoTitle} onChange={(e) => setDraftSeoTitle(e.target.value)}
     />
                 </div>
