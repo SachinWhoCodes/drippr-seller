@@ -190,7 +190,95 @@ export default function Products() {
   }, [uid]);
 
 
-  // Auto-save while Add modal is open and restore on open
+
+  const filtered = useMemo(() => {
+    const s = search.trim().toLowerCase();
+    if (!s) return products.filter(p => p.status !== "deleted");
+    return products
+      .filter(p => p.status !== "deleted")
+      .filter((p) => `${p.title} ${p.productType ?? ""}`.toLowerCase().includes(s));
+  }, [products, search]);
+
+  /** ====== Variants builder state (used by Add & Edit) ====== */
+  const [options, setOptions] = useState<VariantOption[]>([
+    { name: "Size", values: [] },
+    { name: "Color", values: [] },
+  ]);
+  const [valueInputs, setValueInputs] = useState<string[]>(["", "", ""]);
+
+  function setOptionName(idx: number, name: string) {
+    setOptions(prev => {
+      const next = [...prev];
+      if (!next[idx]) next[idx] = { name, values: [] };
+      next[idx] = { ...next[idx], name };
+      return next;
+    });
+  }
+  function addOptionRow() {
+    if (options.length >= 3) return;
+    setOptions(prev => [...prev, { name: `Option ${prev.length + 1}`, values: [] }]);
+    setValueInputs(prev => [...prev, ""]);
+  }
+  function removeOptionRow(idx: number) {
+    setOptions(prev => prev.filter((_, i) => i !== idx));
+    setValueInputs(prev => prev.filter((_, i) => i !== idx));
+  }
+  function addValue(idx: number) {
+    const raw = (valueInputs[idx] || "").trim();
+    if (!raw) return;
+    const values = raw.split(",").map(s => s.trim()).filter(Boolean);
+    setOptions(prev => {
+      const next = [...prev];
+      const existing = new Set(next[idx].values);
+      values.forEach(v => existing.add(v));
+      next[idx] = { ...next[idx], values: Array.from(existing) };
+      return next;
+    });
+    setValueInputs(prev => prev.map((v, i) => (i === idx ? "" : v)));
+  }
+  function removeValue(idx: number, value: string) {
+    setOptions(prev => {
+      const next = [...prev];
+      next[idx] = { ...next[idx], values: next[idx].values.filter(v => v !== value) };
+      return next;
+    });
+  }
+
+  // Generate combination rows from current options' values (1..3)
+  const comboKeys: string[][] = useMemo(() => {
+    const valueLists = options
+      .filter(o => (o?.name || "").trim() && o.values.length > 0)
+      .map(o => o.values);
+    if (valueLists.length === 0) return [];
+    return cartesian(valueLists);
+  }, [options]);
+
+  // Keep editable per-variant rows in state, keyed by "opt1|opt2|opt3"
+  const [variantRows, setVariantRows] = useState<Record<string, VariantRow>>({});
+  useEffect(() => {
+    setVariantRows(prev => {
+      const next: Record<string, VariantRow> = {};
+      for (const combo of comboKeys) {
+        const key = combo.join("|");
+        const title = combo.join(" / ");
+        next[key] = prev[key] ?? {
+          id: key,
+          options: combo,
+          title,
+          price: undefined,
+          compareAtPrice: undefined,
+          sku: "",
+          quantity: undefined,
+          barcode: "",
+          weightGrams: undefined,
+        };
+      }
+      return next;
+    });
+  }, [comboKeys]);
+
+
+    // Auto-save while Add modal is open and restore on open
   useEffect(() => {
     let saveTimer: number | null = null;
     const saveNow = () => {
@@ -331,91 +419,6 @@ export default function Products() {
   // dependencies: when modal open and important pieces change we re-run
   }, [isAddProductOpen, uid, basePriceInput, imagePreviews, options, variantRows, trackInventory, statusSel, handleDeliveryCharge]);
 
-  const filtered = useMemo(() => {
-    const s = search.trim().toLowerCase();
-    if (!s) return products.filter(p => p.status !== "deleted");
-    return products
-      .filter(p => p.status !== "deleted")
-      .filter((p) => `${p.title} ${p.productType ?? ""}`.toLowerCase().includes(s));
-  }, [products, search]);
-
-  /** ====== Variants builder state (used by Add & Edit) ====== */
-  const [options, setOptions] = useState<VariantOption[]>([
-    { name: "Size", values: [] },
-    { name: "Color", values: [] },
-  ]);
-  const [valueInputs, setValueInputs] = useState<string[]>(["", "", ""]);
-
-  function setOptionName(idx: number, name: string) {
-    setOptions(prev => {
-      const next = [...prev];
-      if (!next[idx]) next[idx] = { name, values: [] };
-      next[idx] = { ...next[idx], name };
-      return next;
-    });
-  }
-  function addOptionRow() {
-    if (options.length >= 3) return;
-    setOptions(prev => [...prev, { name: `Option ${prev.length + 1}`, values: [] }]);
-    setValueInputs(prev => [...prev, ""]);
-  }
-  function removeOptionRow(idx: number) {
-    setOptions(prev => prev.filter((_, i) => i !== idx));
-    setValueInputs(prev => prev.filter((_, i) => i !== idx));
-  }
-  function addValue(idx: number) {
-    const raw = (valueInputs[idx] || "").trim();
-    if (!raw) return;
-    const values = raw.split(",").map(s => s.trim()).filter(Boolean);
-    setOptions(prev => {
-      const next = [...prev];
-      const existing = new Set(next[idx].values);
-      values.forEach(v => existing.add(v));
-      next[idx] = { ...next[idx], values: Array.from(existing) };
-      return next;
-    });
-    setValueInputs(prev => prev.map((v, i) => (i === idx ? "" : v)));
-  }
-  function removeValue(idx: number, value: string) {
-    setOptions(prev => {
-      const next = [...prev];
-      next[idx] = { ...next[idx], values: next[idx].values.filter(v => v !== value) };
-      return next;
-    });
-  }
-
-  // Generate combination rows from current options' values (1..3)
-  const comboKeys: string[][] = useMemo(() => {
-    const valueLists = options
-      .filter(o => (o?.name || "").trim() && o.values.length > 0)
-      .map(o => o.values);
-    if (valueLists.length === 0) return [];
-    return cartesian(valueLists);
-  }, [options]);
-
-  // Keep editable per-variant rows in state, keyed by "opt1|opt2|opt3"
-  const [variantRows, setVariantRows] = useState<Record<string, VariantRow>>({});
-  useEffect(() => {
-    setVariantRows(prev => {
-      const next: Record<string, VariantRow> = {};
-      for (const combo of comboKeys) {
-        const key = combo.join("|");
-        const title = combo.join(" / ");
-        next[key] = prev[key] ?? {
-          id: key,
-          options: combo,
-          title,
-          price: undefined,
-          compareAtPrice: undefined,
-          sku: "",
-          quantity: undefined,
-          barcode: "",
-          weightGrams: undefined,
-        };
-      }
-      return next;
-    });
-  }, [comboKeys]);
 
   /** ====== helpers ====== */
 
