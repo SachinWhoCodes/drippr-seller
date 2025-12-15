@@ -151,6 +151,21 @@ export default function Products() {
   const [busy, setBusy] = useState(false);
   const [handleDeliveryCharge, setHandleDeliveryCharge] = useState(true);
   const [basePriceInput, setBasePriceInput] = useState<string>(""); 
+  
+  // NEW: State for draft-supported text fields
+  const [draftTitle, setDraftTitle] = useState("");
+  const [draftDescription, setDraftDescription] = useState("");
+  const [draftVendor, setDraftVendor] = useState("");
+  const [draftSku, setDraftSku] = useState("");
+  const [draftTags, setDraftTags] = useState("");
+  const [draftSeoTitle, setDraftSeoTitle] = useState("");
+  const [draftSeoDesc, setDraftSeoDesc] = useState("");
+  const [draftQuantity, setDraftQuantity] = useState("");
+  const [draftBarcode, setDraftBarcode] = useState("");
+  const [draftWeight, setDraftWeight] = useState("");
+  const [draftComparePrice, setDraftComparePrice] = useState("");
+  const [draftCost, setDraftCost] = useState("");
+  const [draftProductType, setDraftProductType] = useState("");
 
   // shadcn <Select> values (controlled)
   const [trackInventory, setTrackInventory] = useState<"yes" | "no">("yes");
@@ -284,6 +299,22 @@ useEffect(() => {
 
   const timeout = setTimeout(() => {
     saveAddProductDraft(uid, () => ({
+      // Text Fields
+      title: draftTitle,
+      description: draftDescription,
+      vendor: draftVendor,
+      sku: draftSku,
+      tags: draftTags.split(",").map(t => t.trim()).filter(Boolean),
+      seoTitle: draftSeoTitle,
+      seoDescription: draftSeoDesc,
+      quantity: Number(draftQuantity) || null,
+      compareAtPrice: Number(draftComparePrice) || null,
+      cost: Number(draftCost) || null,
+      barcode: draftBarcode,
+      weightGrams: Number(draftWeight) || null,
+      productType: draftProductType,
+      
+      // Existing logic
       basePriceInput,
       trackInventory,
       statusSel,
@@ -322,8 +353,49 @@ useEffect(() => {
   // };
 
 
-  const handleAddProduct = () => {
-    // open modal (restoration will run on open)
+  const handleAddProduct = async () => {
+    // 1. Try to load draft
+    const saved = await loadAddProductDraft(uid);
+    
+    // 2. If draft exists, restore state
+    if (saved) {
+      if (saved.title) setDraftTitle(saved.title);
+      if (saved.description) setDraftDescription(saved.description);
+      if (saved.vendor) setDraftVendor(saved.vendor);
+      if (saved.sku) setDraftSku(saved.sku);
+      if (saved.tags) setDraftTags(saved.tags.join(", "));
+      if (saved.seoTitle) setDraftSeoTitle(saved.seoTitle);
+      if (saved.seoDescription) setDraftSeoDesc(saved.seoDescription);
+      if (saved.basePriceInput) setBasePriceInput(saved.basePriceInput);
+      if (saved.quantity) setDraftQuantity(String(saved.quantity));
+      if (saved.compareAtPrice) setDraftComparePrice(String(saved.compareAtPrice));
+      if (saved.cost) setDraftCost(String(saved.cost));
+      if (saved.barcode) setDraftBarcode(saved.barcode);
+      if (saved.weightGrams) setDraftWeight(String(saved.weightGrams));
+      if (saved.productType) setDraftProductType(saved.productType);
+      
+      // Restore selects
+      if (saved.trackInventory) setTrackInventory(saved.trackInventory);
+      if (saved.statusSel) setStatusSel(saved.statusSel);
+      if (typeof saved.handleDeliveryCharge === 'boolean') setHandleDeliveryCharge(saved.handleDeliveryCharge);
+
+      // Restore variants
+      if (saved.options) setOptions(saved.options);
+      if (saved.variantRows) {
+         const rowsMap: Record<string, VariantRow> = {};
+         saved.variantRows.forEach(r => {
+           // Reconstruct ID based on options logic in main component
+           const key = r.options.join("|"); 
+           rowsMap[key] = { ...r, id: key };
+         });
+         setVariantRows(rowsMap);
+      }
+      // Restore Images (previews only, as File objects cannot be restored from localStorage)
+      if (saved.imagePreviews) setImagePreviews(saved.imagePreviews);
+      
+      toast.success("Draft restored");
+    }
+
     setIsAddProductOpen(true);
   };
 
@@ -498,6 +570,19 @@ useEffect(() => {
       setHandleDeliveryCharge(true);
       setSelectedImages([]);
       setImagePreviews([]);
+      setDraftTitle("");
+setDraftDescription("");
+setDraftVendor("");
+setDraftSku("");
+setDraftTags("");
+setDraftSeoTitle("");
+setDraftSeoDesc("");
+setDraftQuantity("");
+setDraftBarcode("");
+setDraftWeight("");
+setDraftComparePrice("");
+setDraftCost("");
+setDraftProductType("");
       (e.target as HTMLFormElement).reset();
 
       setOptions([{ name: "Size", values: [] }, { name: "Color", values: [] }]);
@@ -1030,18 +1115,27 @@ useEffect(() => {
               {/* Basic Info */}
               <div className="space-y-2">
                 <Label htmlFor="title">Product Title *</Label>
-                <Input id="title" name="title" placeholder="E.g., Premium Cotton T-Shirt" required />
+                <Input 
+      id="title" 
+      name="title" 
+      placeholder="E.g., Premium Cotton T-Shirt" 
+      required 
+      value={draftTitle} 
+      onChange={(e) => setDraftTitle(e.target.value)} 
+    />
               </div>
 
               <div className="space-y-2">
                 <Label htmlFor="description">Description *</Label>
                 <Textarea
-                  id="description"
-                  name="description"
-                  placeholder="Describe your product..."
-                  rows={4}
-                  required
-                />
+      id="description"
+      name="description"
+      placeholder="Describe your product..."
+      rows={4}
+      required
+      value={draftDescription}
+      onChange={(e) => setDraftDescription(e.target.value)}
+    />
               </div>
 
               <div className="grid grid-cols-2 gap-4">
@@ -1082,29 +1176,49 @@ useEffect(() => {
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="compare-price">Compare at Price (₹) <span className="text-destructive">*</span></Label>
-                  <Input id="compare-price" name="compare-price" type="number" placeholder="1499" min={0} step="0.01" required />
+                  <Input 
+      id="compare-price" 
+      name="compare-price" 
+      type="number" 
+      placeholder="1499" 
+      min={0} step="0.01" required 
+      value={draftComparePrice}
+      onChange={(e) => setDraftComparePrice(e.target.value)}
+    />
                 </div>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label htmlFor="cost">Cost per Item (₹)</Label>
-                  <Input id="cost" name="cost" type="number" placeholder="500" min={0} step="0.01" />
+                 <Input 
+       id="cost" name="cost" type="number" placeholder="500" min={0} step="0.01"
+       value={draftCost} onChange={(e) => setDraftCost(e.target.value)}
+    />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="sku">SKU <span className="text-destructive">*</span></Label>
-                  <Input id="sku" name="sku" placeholder="UNIQ-SKU-123" required />
+                  <Input 
+      id="sku" name="sku" placeholder="UNIQ-SKU-123" required 
+      value={draftSku} onChange={(e) => setDraftSku(e.target.value)}
+    />
                 </div>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label htmlFor="barcode">Barcode (ISBN, UPC, etc.)</Label>
-                  <Input id="barcode" name="barcode" placeholder="123456789" />
+                  <Input 
+      id="barcode" name="barcode" placeholder="123456789" 
+      value={draftBarcode} onChange={(e) => setDraftBarcode(e.target.value)}
+    />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="weight">Weight (grams)</Label>
-                  <Input id="weight" name="weight" type="number" placeholder="500" min={0} />
+                  <Input 
+      id="weight" name="weight" type="number" placeholder="500" min={0} 
+      value={draftWeight} onChange={(e) => setDraftWeight(e.target.value)}
+    />
                 </div>
               </div>
 
@@ -1112,7 +1226,10 @@ useEffect(() => {
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label htmlFor="quantity">Quantity <span className="text-destructive">*</span></Label>
-                  <Input id="quantity" name="quantity" type="number" placeholder="100" min={0} required />
+                  <Input 
+      id="quantity" name="quantity" type="number" placeholder="100" min={0} required 
+      value={draftQuantity} onChange={(e) => setDraftQuantity(e.target.value)}
+    />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="track-inventory">Track Inventory</Label>
@@ -1132,17 +1249,26 @@ useEffect(() => {
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label htmlFor="product-type">Product Type</Label>
-                  <Input id="product-type" name="product-type" placeholder="T-Shirts" />
+                  <Input 
+      id="product-type" name="product-type" placeholder="T-Shirts" 
+      value={draftProductType} onChange={(e) => setDraftProductType(e.target.value)}
+    />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="vendor">Vendor <span className="text-destructive">*</span></Label>
-                  <Input id="vendor" name="vendor" placeholder="Brand name" required />
+                  <Input 
+      id="vendor" name="vendor" placeholder="Brand name" required 
+      value={draftVendor} onChange={(e) => setDraftVendor(e.target.value)}
+    />
                 </div>
               </div>
 
               <div className="space-y-2">
                 <Label htmlFor="tags">Tags (comma-separated)</Label>
-                <Input id="tags" name="tags" placeholder="casual, cotton, comfortable" />
+                <Input 
+      id="tags" name="tags" placeholder="casual, cotton, comfortable" 
+      value={draftTags} onChange={(e) => setDraftTags(e.target.value)}
+    />
               </div>
 
               {/* ===== Variants (plan for Admin) ===== */}
@@ -1165,7 +1291,10 @@ useEffect(() => {
                 <h3 className="font-semibold">Search Engine Listing <span className="text-destructive">*</span></h3>
                 <div className="space-y-2">
                   <Label htmlFor="seo-title">SEO Title</Label>
-                  <Input id="seo-title" name="seo-title" placeholder="Premium Cotton T-Shirt | DRIPPR" required />
+                  <Input 
+      id="seo-title" name="seo-title" placeholder="..." required 
+      value={draftSeoTitle} onChange={(e) => setDraftSeoTitle(e.target.value)}
+    />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="seo-description">SEO Description</Label>
@@ -1174,6 +1303,7 @@ useEffect(() => {
                     name="seo-description"
                     placeholder="High quality cotton t-shirt, comfortable and stylish..."
                     rows={3}
+                    value={draftSeoDesc} onChange={(e) => setDraftSeoDesc(e.target.value)}
                     required
                   />
                 </div>
@@ -1211,6 +1341,19 @@ useEffect(() => {
                   setHandleDeliveryCharge(true);
                   setTrackInventory("yes");
                   setStatusSel("active");
+                  setDraftTitle("");
+setDraftDescription("");
+setDraftVendor("");
+setDraftSku("");
+setDraftTags("");
+setDraftSeoTitle("");
+setDraftSeoDesc("");
+setDraftQuantity("");
+setDraftBarcode("");
+setDraftWeight("");
+setDraftComparePrice("");
+setDraftCost("");
+setDraftProductType("");
                   const form = document.getElementById("add-product-form") as HTMLFormElement | null;
                   form?.reset();
                   toast("Draft discarded.");
