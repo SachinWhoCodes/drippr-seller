@@ -279,146 +279,35 @@ export default function Products() {
 
 
     // Auto-save while Add modal is open and restore on open
-  useEffect(() => {
-    let saveTimer: number | null = null;
-    const saveNow = () => {
-      if (!uid) return;
-      // call save with a reader similar to the one used on close
-      saveAddProductDraft(uid, () => {
-        const form = document.getElementById("add-product-form") as HTMLFormElement | null;
-        const f = form ? new FormData(form) : new FormData();
-        const draft: AddProductDraft = {
-          title: String(f.get("title") || "").trim() || undefined,
-          description: String(f.get("description") || "").trim() || undefined,
-          basePriceInput: basePriceInput || undefined,
-          compareAtPrice: (() => { const v = String(f.get("compare-price") || ""); return v === "" ? undefined : Number(v); })(),
-          cost: (() => { const v = String(f.get("cost") || ""); return v === "" ? undefined : Number(v); })(),
-          barcode: String(f.get("barcode") || "").trim() || undefined,
-          weightGrams: (() => { const v = String(f.get("weight") || ""); return v === "" ? undefined : Number(v); })(),
-          quantity: (() => { const v = String(f.get("quantity") || ""); return v === "" ? undefined : Number(v); })(),
-          vendor: String(f.get("vendor") || "").trim() || undefined,
-          productType: String(f.get("product-type") || "").trim() || undefined,
-          tags: (String(f.get("tags") || "") || "").split(",").map(t => t.trim()).filter(Boolean),
-          seoTitle: String(f.get("seo-title") || "").trim() || undefined,
-          seoDescription: String(f.get("seo-description") || "").trim() || undefined,
-          sku: String(f.get("sku") || "").trim() || undefined,
-          trackInventory: trackInventory,
-          statusSel: statusSel,
-          handleDeliveryCharge: handleDeliveryCharge,
-          imagePreviews: imagePreviews,
-          options: options.length ? options : undefined,
-          variantRows: Object.keys(variantRows).length ? Object.values(variantRows).map(v => {
-            const { id, ...rest } = v;
-            return rest;
-          }) : undefined,
-        };
-        return draft;
-      });
-    };
+useEffect(() => {
+  if (!isAddProductOpen || !uid) return;
 
-    // When modal opens, load draft (once)
-    if (isAddProductOpen && uid) {
-      (async () => {
-        const draft = await loadAddProductDraft(uid);
-        if (!draft) return;
-        // set simple controlled state fields
-        if (draft.basePriceInput != null) setBasePriceInput(String(draft.basePriceInput));
-        if (draft.trackInventory) setTrackInventory(draft.trackInventory);
-        if (draft.statusSel) setStatusSel(draft.statusSel);
-        if (draft.handleDeliveryCharge != null) setHandleDeliveryCharge(!!draft.handleDeliveryCharge);
-        if (draft.options) setOptions(draft.options);
-        if (draft.variantRows) {
-          const vr: Record<string, VariantRow> = {};
-          draft.variantRows.forEach((v) => {
-            const key = (v.options || []).join("|") || Math.random().toString(36).slice(2, 9);
-            vr[key] = { id: key, options: v.options || [], title: v.title || (v.options || []).join(" / "), price: v.price, compareAtPrice: v.compareAtPrice, sku: v.sku || "", quantity: v.quantity, barcode: v.barcode || "", weightGrams: v.weightGrams };
-          });
-          setVariantRows(vr);
-        }
-        // form fields (uncontrolled inputs) — populate DOM directly
-        const form = document.getElementById("add-product-form") as HTMLFormElement | null;
-        if (form && draft) {
-          const titleEl = form.querySelector(`#title`) as HTMLInputElement | null;
-          if (titleEl) titleEl.value = draft.title || "";
-          const descEl = form.querySelector(`#description`) as HTMLTextAreaElement | null;
-          if (descEl) descEl.value = draft.description || "";
-          const vendorEl = form.querySelector(`#vendor`) as HTMLInputElement | null;
-          if (vendorEl) vendorEl.value = draft.vendor || "";
-          const typeEl = form.querySelector(`#product-type`) as HTMLInputElement | null;
-          if (typeEl) typeEl.value = draft.productType || "";
-          const tagsEl = form.querySelector(`#tags`) as HTMLInputElement | null;
-          if (tagsEl) tagsEl.value = (draft.tags || []).join(", ");
-          const seoTitleEl = form.querySelector(`#seo-title`) as HTMLInputElement | null;
-          if (seoTitleEl) seoTitleEl.value = draft.seoTitle || "";
-          const seoDescEl = form.querySelector(`#seo-description`) as HTMLTextAreaElement | null;
-          if (seoDescEl) seoDescEl.value = draft.seoDescription || "";
-          const skuEl = form.querySelector(`#sku`) as HTMLInputElement | null;
-          if (skuEl) skuEl.value = draft.sku || "";
-          const comparePriceEl = form.querySelector(`#compare-price`) as HTMLInputElement | null;
-          if (comparePriceEl) comparePriceEl.value = draft.compareAtPrice != null ? String(draft.compareAtPrice) : "";
-          const costEl = form.querySelector(`#cost`) as HTMLInputElement | null;
-          if (costEl) costEl.value = draft.cost != null ? String(draft.cost) : "";
-          const barcodeEl = form.querySelector(`#barcode`) as HTMLInputElement | null;
-          if (barcodeEl) barcodeEl.value = draft.barcode || "";
-          const weightEl = form.querySelector(`#weight`) as HTMLInputElement | null;
-          if (weightEl) weightEl.value = draft.weightGrams != null ? String(draft.weightGrams) : "";
-          const qtyEl = form.querySelector(`#quantity`) as HTMLInputElement | null;
-          if (qtyEl) qtyEl.value = draft.quantity != null ? String(draft.quantity) : "";
-        }
+  const timeout = setTimeout(() => {
+    saveAddProductDraft(uid, () => ({
+      basePriceInput,
+      trackInventory,
+      statusSel,
+      handleDeliveryCharge,
+      imagePreviews,
+      options,
+      variantRows: Object.keys(variantRows).length
+        ? Object.values(variantRows).map(({ id, ...r }) => r)
+        : undefined,
+    }));
+  }, 500);
 
-        // images: restore previews and attempt to reconstruct File objects
-        if (draft.imagePreviews && draft.imagePreviews.length) {
-          setImagePreviews(draft.imagePreviews);
-          try {
-            const files = await Promise.all(
-              draft.imagePreviews.map(async (dataUrl, idx) => {
-                try {
-                  const res = await fetch(dataUrl);
-                  const blob = await res.blob();
-                  const ext = blob.type.split("/")[1] || "png";
-                  const file = new File([blob], `draft-image-${idx + 1}.${ext}`, { type: blob.type });
-                  return file;
-                } catch (err) {
-                  return null;
-                }
-              })
-            );
-            setSelectedImages(files.filter(Boolean) as File[]);
-          } catch (err) {
-            console.warn("Could not reconstruct draft image Files", err);
-          }
-        }
-      })();
-    }
-
-    // attach listeners to autosave during open
-    const formEl = document.getElementById("add-product-form") as HTMLFormElement | null;
-    function scheduleSave() {
-      if (saveTimer) window.clearTimeout(saveTimer);
-      saveTimer = window.setTimeout(() => { saveNow(); }, 400);
-    }
-    if (isAddProductOpen && formEl) {
-      formEl.addEventListener("input", scheduleSave);
-      formEl.addEventListener("change", scheduleSave);
-    }
-    // also save on controlled-state changes
-    if (isAddProductOpen) {
-      scheduleSave();
-    }
-
-    return () => {
-      if (formEl) {
-        formEl.removeEventListener("input", scheduleSave);
-        formEl.removeEventListener("change", scheduleSave);
-      }
-      if (saveTimer) {
-        window.clearTimeout(saveTimer);
-        saveTimer = null;
-      }
-    };
-  // dependencies: when modal open and important pieces change we re-run
-  }, [isAddProductOpen, uid, basePriceInput, imagePreviews, options, variantRows, trackInventory, statusSel, handleDeliveryCharge]);
-
+  return () => clearTimeout(timeout);
+}, [
+  isAddProductOpen,
+  uid,
+  basePriceInput,
+  trackInventory,
+  statusSel,
+  handleDeliveryCharge,
+  imagePreviews,
+  options,
+  variantRows,
+]);
 
   /** ====== helpers ====== */
 
@@ -429,7 +318,7 @@ export default function Products() {
   //   setVariantRows({});
   //   setSelectedImages([]);
   //   setImagePreviews([]);
-  //   setIsAddProductOpen(true);
+  //   set(true);
   // };
 
 
@@ -439,44 +328,8 @@ export default function Products() {
   };
 
   const handleAddDialogOpenChange = (open: boolean) => {
-    // if closing, capture a snapshot immediately
-    if (!open) {
-      // save once: pass a lightweight reader which collects current form + relevant state
-      saveAddProductDraft(uid, () => {
-        // gather values from DOM + controlled pieces
-        const form = document.getElementById("add-product-form") as HTMLFormElement | null;
-        const f = form ? new FormData(form) : new FormData();
-        const draft: AddProductDraft = {
-          title: String(f.get("title") || "").trim() || undefined,
-          description: String(f.get("description") || "").trim() || undefined,
-          basePriceInput: basePriceInput || undefined,
-          compareAtPrice: (() => { const v = String(f.get("compare-price") || ""); return v === "" ? undefined : Number(v); })(),
-          cost: (() => { const v = String(f.get("cost") || ""); return v === "" ? undefined : Number(v); })(),
-          barcode: String(f.get("barcode") || "").trim() || undefined,
-          weightGrams: (() => { const v = String(f.get("weight") || ""); return v === "" ? undefined : Number(v); })(),
-          quantity: (() => { const v = String(f.get("quantity") || ""); return v === "" ? undefined : Number(v); })(),
-          vendor: String(f.get("vendor") || "").trim() || undefined,
-          productType: String(f.get("product-type") || "").trim() || undefined,
-          tags: (String(f.get("tags") || "") || "").split(",").map(t => t.trim()).filter(Boolean),
-          seoTitle: String(f.get("seo-title") || "").trim() || undefined,
-          seoDescription: String(f.get("seo-description") || "").trim() || undefined,
-          sku: String(f.get("sku") || "").trim() || undefined,
-          trackInventory: trackInventory,
-          statusSel: statusSel,
-          handleDeliveryCharge: handleDeliveryCharge,
-          imagePreviews: imagePreviews,
-          options: options.length ? options : undefined,
-          variantRows: Object.keys(variantRows).length ? Object.values(variantRows).map(v => {
-            const { id, ...rest } = v;
-            return rest;
-          }) : undefined,
-        };
-        return draft;
-      });
-    }
-    // update UI open state
-    setIsAddProductOpen(open);
-  };
+  setIsAddProductOpen(open);
+};
 
   const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
@@ -1343,23 +1196,6 @@ export default function Products() {
                 </p>
               </div>
 
-              {/* Actions */}
-              <div className="flex justify-end gap-3">
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => {
-                    setIsAddProductOpen(false);
-                    setSelectedImages([]);
-                    setImagePreviews([]);
-                  }}
-                >
-                  Cancel
-                </Button>
-                <Button type="submit" disabled={busy}>
-                  {busy ? "Submitting…" : "Submit for Review"}
-                </Button>
-              </div>
 
               {/* Add form actions: Save draft, Discard, Submit */}
               <div className="flex justify-end gap-2">
