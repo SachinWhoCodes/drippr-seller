@@ -1342,23 +1342,23 @@ setDraftProductType("");
                   setTrackInventory("yes");
                   setStatusSel("active");
                   setDraftTitle("");
-setDraftDescription("");
-setDraftVendor("");
-setDraftSku("");
-setDraftTags("");
-setDraftSeoTitle("");
-setDraftSeoDesc("");
-setDraftQuantity("");
-setDraftBarcode("");
-setDraftWeight("");
-setDraftComparePrice("");
-setDraftCost("");
-setDraftProductType("");
+                  setDraftDescription("");
+                  setDraftVendor("");
+                  setDraftSku("");
+                  setDraftTags("");
+                  setDraftSeoTitle("");
+                  setDraftSeoDesc("");
+                  setDraftQuantity("");
+                  setDraftBarcode("");
+                  setDraftWeight("");
+                  setDraftComparePrice("");
+                  setDraftCost("");
+                  setDraftProductType("");
                   const form = document.getElementById("add-product-form") as HTMLFormElement | null;
                   form?.reset();
                   toast("Draft discarded.");
                 }}>
-                  Discard draft
+                  Clear Form
                 </Button>
 
                 <Button type="button" variant="outline" onClick={() => {
@@ -1380,7 +1380,7 @@ setDraftProductType("");
                   });
                   toast("Draft saved locally.");
                 }}>
-                  Save draft
+                  Save Locally
                 </Button>
 
                 <Button type="submit" disabled={busy}>
