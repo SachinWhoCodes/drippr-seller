@@ -27,6 +27,7 @@ import AdminSettings from "./pages/admin/Settings";
 import AdminSupport from "./pages/admin/Support";
 import MediaBucket from "./pages/MediaBucket";
 import Notifications from "./pages/Notifications";
+import AdminOrdersMonitor from "./pages/admin/OrdersMonitor";
 
 const queryClient = new QueryClient();
 
@@ -81,6 +82,7 @@ const App = () => (
           <Route path="/admin" element={<AdminGuard><AdminLayout /></AdminGuard>}>
             <Route index element={<AdminDashboard />} />
             <Route path="queue" element={<ProductQueue />} />
+            <Route path="orders" element={<AdminOrdersMonitor />} />
             <Route path="merchants" element={<Merchants />} />
             <Route path="support" element={<AdminSupport />} />
             <Route path="settings" element={<AdminSettings />} />

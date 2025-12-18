@@ -8,6 +8,7 @@ import { useState } from "react";
 const navItems = [
   { title: "Dashboard", path: "/admin", icon: LayoutDashboard },
   { title: "Review Queue", path: "/admin/queue", icon: Package },
+  { title: "Order Manager", path: "/admin/orders", icon: Package },
   { title: "Merchants", path: "/admin/merchants", icon: Users },
   { title: "Support", path: "/admin/support", icon: MessageSquare },
   { title: "Settings", path: "/admin/settings", icon: Settings },
