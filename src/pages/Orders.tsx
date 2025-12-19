@@ -550,7 +550,7 @@ export default function Orders() {
                   </div>
 
                   <div>
-                    <div className="text-muted-foreground">Shopify Order ID</div>
+                    <div className="text-muted-foreground">Order ID</div>
                     <div className="text-xs">{selected.shopifyOrderId}</div>
                   </div>
                 </div>

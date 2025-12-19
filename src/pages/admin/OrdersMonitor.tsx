@@ -389,7 +389,7 @@ export default function AdminOrdersMonitor() {
   }
 
   return (
-    <DashboardLayout>
+    <>
       <div className="space-y-6">
         <div>
           <h2 className="text-3xl font-bold tracking-tight">Orders Monitor</h2>
@@ -753,7 +753,7 @@ export default function AdminOrdersMonitor() {
           )}
         </DialogContent>
       </Dialog>
-    </DashboardLayout>
+    </>
   );
 }
 
