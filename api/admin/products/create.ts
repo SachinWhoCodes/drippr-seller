@@ -13,7 +13,7 @@ function skuClaimId(uid: string, sku: string) {
 
 /* ---------------- Shopify GQL ---------------- */
 
-// Updated to return all created variants and include Options
+// Updated Mutation: Added 'options' and 'variants' to the input and return fields
 const PRODUCT_CREATE = /* GraphQL */ `
   mutation productCreate($product: ProductCreateInput!, $media: [CreateMediaInput!]) {
     productCreate(product: $product, media: $media) {
@@ -26,6 +26,7 @@ const PRODUCT_CREATE = /* GraphQL */ `
           nodes { 
             id 
             sku
+            price
             inventoryItem { id } 
           } 
         }
@@ -46,7 +47,7 @@ const PRODUCT_IMAGES_QUERY = /* GraphQL */ `
   }
 `;
 
-/* ---------------- utils ---------------- */
+/* ---------------- util: CDN fetch with retry ---------------- */
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
@@ -69,8 +70,12 @@ async function fetchCdnUrlsWithRetry(productId: string): Promise<string[]> {
   return [];
 }
 
+/* ---------------- handler ---------------- */
+
 export default async function handler(req: any, res: any) {
-  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Method not allowed" });
+  if (req.method !== "POST") {
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
+  }
 
   let claimedSkuRef: FirebaseFirestore.DocumentReference | null = null;
 
@@ -86,55 +91,65 @@ export default async function handler(req: any, res: any) {
     const body = req.body || {};
     const {
       title, description, price, compareAtPrice, barcode,
-      inventory = {}, currency = "INR", tags = [],
-      resourceUrls = [], vendor, productType, status,
-      seo, sku: rawSku, variantDraft,
+      inventory = {}, tags = [], resourceUrls = [],
+      vendor, productType, status, seo, sku: rawSku,
+      variantDraft, // This is our key data from the frontend
     } = body;
 
-    if (!title || price == null || !vendor || !rawSku) {
+    if (!title || price == null || !vendor || !rawSku || compareAtPrice == null) {
       return res.status(400).json({ ok: false, error: "Missing required fields" });
     }
-    const sku = normSku(rawSku);
+    const baseSku = normSku(rawSku);
 
-    // --- 1. Prepare Shopify Variants & Options ---
+    // --- 1) Prepare Shopify Variants & Options ---
     let shopifyVariants: any[] = [];
     let shopifyOptions: string[] = [];
 
     if (variantDraft && Object.keys(variantDraft).length > 0) {
       const rows = Object.values(variantDraft) as any[];
-      // Extract option names from the first variant (e.g., ["Size", "Color"])
+      // Extract option names (e.g., ["Size", "Color"]) from the first row
       shopifyOptions = rows[0].optionValues.map((ov: any) => ov.name);
 
       shopifyVariants = rows.map((v) => ({
         price: String(v.price || price),
-        compareAtPrice: v.compareAtPrice ? String(v.compareAtPrice) : String(compareAtPrice),
+        compareAtPrice: String(v.compareAtPrice || compareAtPrice),
         sku: normSku(v.sku),
         barcode: v.barcode || undefined,
         options: v.optionValues.map((ov: any) => ov.value),
         inventoryItem: { tracked: true },
-        inventoryQuantities: v.stock ? [{ 
-          availableQuantity: Number(v.stock), 
-          locationId: process.env.SHOPIFY_LOCATION_ID 
+        inventoryQuantities: v.stock ? [{
+          availableQuantity: Number(v.stock),
+          locationId: process.env.SHOPIFY_LOCATION_ID
         }] : []
       }));
     } else {
-      // Single product fallback
+      // Standard single-product variant
       shopifyVariants = [{
         price: String(price),
         compareAtPrice: String(compareAtPrice),
-        sku: sku,
+        sku: baseSku,
         barcode: barcode || undefined,
         inventoryItem: { tracked: inventory.tracked ?? true },
-        inventoryQuantities: inventory.quantity ? [{ 
-          availableQuantity: Number(inventory.quantity), 
-          locationId: process.env.SHOPIFY_LOCATION_ID 
+        inventoryQuantities: inventory.quantity ? [{
+          availableQuantity: Number(inventory.quantity),
+          locationId: process.env.SHOPIFY_LOCATION_ID
         }] : []
       }];
     }
 
     const shopifyTags = [...new Set([`merchant:${merchantId}`, ...tags])];
     
-    // --- 2. Build Product Input ---
+    // --- 2) SKU claim (Base SKU) ---
+    const docRef = adminDb.collection("merchantProducts").doc();
+    const claimRef = adminDb.collection("skuClaims").doc(skuClaimId(merchantId, baseSku));
+    try {
+      await claimRef.create({ merchantId, productDocId: docRef.id, createdAt: Date.now() });
+      claimedSkuRef = claimRef;
+    } catch {
+      return res.status(409).json({ ok: false, error: "Base SKU already used by you" });
+    }
+
+    // --- 3) Construct Shopify Input ---
     const productInput = {
       title,
       descriptionHtml: description || "",
@@ -143,26 +158,18 @@ export default async function handler(req: any, res: any) {
       status: variantDraft ? "DRAFT" : (status ? String(status).toUpperCase() : "ACTIVE"),
       seo: seo || undefined,
       tags: shopifyTags,
-      options: shopifyOptions,
-      variants: shopifyVariants, // All variants sent here
+      options: shopifyOptions.length > 0 ? shopifyOptions : undefined,
+      variants: shopifyVariants,
     };
 
-    const mediaInput = resourceUrls.map((u: string) => ({
-      originalSource: u,
-      mediaContentType: "IMAGE",
-    }));
+    const mediaInput = Array.isArray(resourceUrls) && resourceUrls.length
+      ? resourceUrls.slice(0, 10).map((u: string) => ({
+          originalSource: u,
+          mediaContentType: "IMAGE" as const,
+        }))
+      : undefined;
 
-    // --- 3. SKU Claim ---
-    const docRef = adminDb.collection("merchantProducts").doc();
-    const claimRef = adminDb.collection("skuClaims").doc(skuClaimId(merchantId, sku));
-    try {
-      await claimRef.create({ merchantId, productDocId: docRef.id, createdAt: Date.now() });
-      claimedSkuRef = claimRef;
-    } catch {
-      return res.status(409).json({ ok: false, error: "Base SKU already used" });
-    }
-
-    // --- 4. Shopify Create ---
+    // --- 4) Create on Shopify ---
     const createRes = await shopifyGraphQL(PRODUCT_CREATE, { product: productInput, media: mediaInput });
     const userErrors = createRes?.data?.productCreate?.userErrors || [];
     if (userErrors.length) {
@@ -172,10 +179,10 @@ export default async function handler(req: any, res: any) {
     const product = createRes.data.productCreate.product;
     const variantsCreated = product.variants.nodes;
 
-    // --- 5. Image Processing ---
-    let cdnUrls = await fetchCdnUrlsWithRetry(product.id);
+    // --- 5) Fetch permanent CDN URLs ---
+    let cdnUrls: string[] = await fetchCdnUrlsWithRetry(product.id);
 
-    // --- 6. Firestore Mirroring ---
+    // --- 6) Mirror to Firestore ---
     const allVariantIds = variantsCreated.map((v: any) => v.id);
     const allNumericVariantIds = allVariantIds.map((id: string) => id.split("/").pop());
 
@@ -185,13 +192,13 @@ export default async function handler(req: any, res: any) {
       title,
       description: description || "",
       price: Number(price),
-      currency,
+      currency: "INR",
       status: "pending",
       published: false,
-      sku,
+      sku: baseSku,
       shopifyProductId: product.id,
       shopifyProductNumericId: String(product.id).split("/").pop(),
-      shopifyVariantIds: allVariantIds, // Full list synced
+      shopifyVariantIds: allVariantIds,
       shopifyVariantNumericIds: allNumericVariantIds,
       tags: shopifyTags,
       image: cdnUrls[0] || null,
@@ -200,7 +207,7 @@ export default async function handler(req: any, res: any) {
       stock: variantDraft ? null : (inventory?.quantity ?? null),
       vendor,
       productType: productType || null,
-      variantDraft: variantDraft || null, 
+      variantDraft: variantDraft || null, // Keeping the draft for admin UI purposes
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
@@ -209,11 +216,12 @@ export default async function handler(req: any, res: any) {
       ok: true,
       productId: product.id,
       firestoreId: docRef.id,
+      inReview: Boolean(variantDraft),
     });
 
   } catch (e: any) {
     if (claimedSkuRef) await claimedSkuRef.delete().catch(() => {});
-    console.error("Creation Error:", e.message);
-    return res.status(500).json({ ok: false, error: e.message });
+    console.error("Create Product Error:", e.message);
+    return res.status(500).json({ ok: false, error: e.message || "Internal error" });
   }
 }
