@@ -3,48 +3,49 @@ import { getAdmin } from "../../_lib/firebaseAdmin.js";
 import { shopifyGraphQL } from "../../_lib/shopify.js";
 
 /* ---------------- helpers ---------------- */
-function normSku(raw: string): string {
-  return String(raw || "").trim().toUpperCase().replace(/\s+/g, "-");
-}
-function skuClaimId(uid: string, sku: string) {
-  return `${uid}__${normSku(sku)}`;
-}
+const normSku = (s: string) =>
+  String(s || "").trim().toUpperCase().replace(/\s+/g, "-");
 
-/* ---------------- Shopify GQL ---------------- */
+const skuClaimId = (uid: string, sku: string) =>
+  `${uid}__${normSku(sku)}`;
 
-// We use the reliable creation mutation from your first code
-const PRODUCT_CREATE = /* GraphQL */ `
-  mutation productCreate($product: ProductCreateInput!, $media: [CreateMediaInput!]) {
-    productCreate(product: $product, media: $media) {
-      product {
-        id
-        title
-        variants(first: 100) { 
-          nodes { 
-            id 
-            sku
-            inventoryItem { id } 
-          } 
-        }
-      }
-      userErrors { field message }
-    }
+/* ---------------- GQL ---------------- */
+
+const PRODUCT_CREATE = `
+mutation productCreate($product: ProductCreateInput!, $media: [CreateMediaInput!]) {
+  productCreate(product: $product, media: $media) {
+    product { id }
+    userErrors { message }
   }
-`;
+}`;
 
-const PRODUCT_IMAGES_QUERY = /* GraphQL */ `
-  query productImages($id: ID!) {
-    product(id: $id) {
-      id
-      images(first: 100) { nodes { url } }
-    }
+const VARIANTS_BULK_CREATE = `
+mutation productVariantsBulkCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+  productVariantsBulkCreate(productId: $productId, variants: $variants) {
+    productVariants { id sku }
+    userErrors { message }
   }
-`;
+}`;
 
-/* ---------------- Utils ---------------- */
-function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
+const VARIANTS_BULK_UPDATE = `
+mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+  productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+    productVariants { id }
+    userErrors { message }
+  }
+}`;
 
-async function fetchCdnUrlsWithRetry(productId: string): Promise<string[]> {
+const PRODUCT_IMAGES_QUERY = `
+query productImages($id: ID!) {
+  product(id: $id) {
+    images(first: 100) { nodes { url } }
+  }
+}`;
+
+/* ---------------- utils ---------------- */
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+async function fetchCdnUrlsWithRetry(productId: string) {
   for (let i = 0; i < 6; i++) {
     const r = await shopifyGraphQL(PRODUCT_IMAGES_QUERY, { id: productId });
     const urls = r?.data?.product?.images?.nodes?.map((n: any) => n.url) || [];
@@ -54,7 +55,7 @@ async function fetchCdnUrlsWithRetry(productId: string): Promise<string[]> {
   return [];
 }
 
-/* ---------------- Main Handler ---------------- */
+/* ---------------- handler ---------------- */
 export default async function handler(req: any, res: any) {
   if (req.method !== "POST") return res.status(405).json({ ok: false });
 
@@ -62,108 +63,101 @@ export default async function handler(req: any, res: any) {
 
   try {
     const { adminAuth, adminDb } = getAdmin();
-    const authHeader = String(req.headers.authorization || "");
-    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+
+    // --- auth ---
+    const token = String(req.headers.authorization || "").replace("Bearer ", "");
     const decoded = await adminAuth.verifyIdToken(token);
     const merchantId = decoded.uid;
 
     const {
-      title, description, price, compareAtPrice, sku: rawSku,
-      vendor, productType, tags = [], resourceUrls = [],
-      variantDraft, inventory = {}
+      title,
+      description,
+      vendor,
+      productType,
+      tags = [],
+      resourceUrls = [],
+      variantDraft,
+      price,
+      compareAtPrice
     } = req.body;
 
-    const baseSku = normSku(rawSku);
+    /* ---------- STEP 1: OPTIONS ---------- */
+    const rows = Object.values(variantDraft || {}) as any[];
+    const optionNames = rows[0].optionValues.map((o: any) => o.name);
 
-    // --- STEP 1: Prepare Variants & Options (The Working Fix) ---
-    let shopifyVariants: any[] = [];
-    let shopifyOptions: string[] = [];
-
-    if (variantDraft && Object.keys(variantDraft).length > 0) {
-      const rows = Object.values(variantDraft) as any[];
-      // Get option names like ["Size", "Color"]
-      shopifyOptions = rows[0].optionValues.map((ov: any) => ov.name);
-      
-      shopifyVariants = rows.map((v) => ({
-        price: String(v.price || price),
-        compareAtPrice: String(v.compareAtPrice || compareAtPrice || price),
-        sku: normSku(v.sku),
-        options: v.optionValues.map((ov: any) => ov.value),
-        inventoryItem: { tracked: true }
-        // Note: We skip inventoryQuantities here to avoid LocationID errors that break 500
-      }));
-    } else {
-      // Standard fallback from your first code
-      shopifyVariants = [{
-        price: String(price),
-        compareAtPrice: String(compareAtPrice || price),
-        sku: baseSku,
-        inventoryItem: { tracked: inventory.tracked ?? true }
-      }];
-    }
-
-    // --- STEP 2: SKU Claim ---
+    /* ---------- STEP 2: SKU CLAIM ---------- */
     const docRef = adminDb.collection("merchantProducts").doc();
-    const claimRef = adminDb.collection("skuClaims").doc(skuClaimId(merchantId, baseSku));
-    try {
-      await claimRef.create({ merchantId, productDocId: docRef.id, createdAt: Date.now() });
-      claimedSkuRef = claimRef;
-    } catch {
-      return res.status(409).json({ ok: false, error: "SKU already used" });
-    }
+    const baseSku = normSku(rows[0].sku);
+    const claimRef = adminDb
+      .collection("skuClaims")
+      .doc(skuClaimId(merchantId, baseSku));
 
-    // --- STEP 3: Create on Shopify ---
-    const productInput = {
-      title,
-      descriptionHtml: description || "",
-      vendor: vendor || "DRIPPR Marketplace",
-      productType: productType || "",
-      status: "DRAFT", // Always start as draft for safety
-      tags: [...new Set([`merchant:${merchantId}`, ...tags])],
-      options: shopifyOptions.length > 0 ? shopifyOptions : undefined,
-      variants: shopifyVariants
-    };
+    await claimRef.create({ merchantId, productDocId: docRef.id });
+    claimedSkuRef = claimRef;
 
-    const mediaInput = resourceUrls.map((u: string) => ({
-      originalSource: u,
-      mediaContentType: "IMAGE"
+    /* ---------- STEP 3: CREATE PRODUCT ---------- */
+    const productRes = await shopifyGraphQL(PRODUCT_CREATE, {
+      product: {
+        title,
+        descriptionHtml: description || "",
+        vendor,
+        productType,
+        status: "DRAFT",
+        options: optionNames,
+        tags: [...new Set([`merchant:${merchantId}`, ...tags])]
+      },
+      media: resourceUrls.map((u: string) => ({
+        originalSource: u,
+        mediaContentType: "IMAGE"
+      }))
+    });
+
+    const productId = productRes.data.productCreate.product.id;
+
+    /* ---------- STEP 4: CREATE VARIANTS ---------- */
+    const variantsPayload = rows.map(v => ({
+      sku: normSku(v.sku),
+      price: String(v.price || price),
+      compareAtPrice: String(v.compareAtPrice || compareAtPrice || price),
+      options: v.optionValues.map((o: any) => o.value)
     }));
 
-    const createRes = await shopifyGraphQL(PRODUCT_CREATE, { product: productInput, media: mediaInput });
-    
-    if (createRes?.data?.productCreate?.userErrors?.length) {
-      const err = createRes.data.productCreate.userErrors[0].message;
-      throw new Error(err);
-    }
+    const vCreate = await shopifyGraphQL(VARIANTS_BULK_CREATE, {
+      productId,
+      variants: variantsPayload
+    });
 
-    const product = createRes.data.productCreate.product;
-    const variantsCreated = product.variants.nodes;
+    const variants = vCreate.data.productVariantsBulkCreate.productVariants;
 
-    // --- STEP 4: Image & ID Sync ---
-    const cdnUrls = await fetchCdnUrlsWithRetry(product.id);
-    const allVariantIds = variantsCreated.map((v: any) => v.id);
-    const allNumericIds = allVariantIds.map((id: string) => id.split("/").pop());
+    /* ---------- STEP 5: INVENTORY META ---------- */
+    await shopifyGraphQL(VARIANTS_BULK_UPDATE, {
+      productId,
+      variants: variants.map((v: any) => ({
+        id: v.id,
+        inventoryItem: { tracked: true }
+      }))
+    });
 
-    // --- STEP 5: Save to Firestore ---
+    /* ---------- STEP 6: IMAGES ---------- */
+    const cdnUrls = await fetchCdnUrlsWithRetry(productId);
+
+    /* ---------- STEP 7: FIRESTORE ---------- */
     await docRef.set({
       id: docRef.id,
       merchantId,
       title,
-      price: Number(price),
-      sku: baseSku,
-      shopifyProductId: product.id,
-      shopifyVariantIds: allVariantIds, // This ensures orders show up!
-      shopifyVariantNumericIds: allNumericIds,
+      shopifyProductId: productId,
+      shopifyVariantIds: variants.map((v: any) => v.id),
+      shopifyVariantNumericIds: variants.map((v: any) => v.id.split("/").pop()),
       image: cdnUrls[0] || null,
       images: cdnUrls,
+      variantDraft,
       status: "pending",
-      variantDraft: variantDraft || null,
       createdAt: Date.now(),
-      updatedAt: Date.now(),
-      vendor
+      updatedAt: Date.now()
     });
 
-    return res.status(200).json({ ok: true, productId: product.id });
+    return res.status(200).json({ ok: true, productId });
 
   } catch (e: any) {
     if (claimedSkuRef) await claimedSkuRef.delete().catch(() => {});
