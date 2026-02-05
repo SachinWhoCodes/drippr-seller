@@ -192,12 +192,14 @@ export default function AdminOrdersMonitor() {
     const base = stored || "vendor_pending";
 
     if (base === "vendor_pending") {
-      const acceptBy = Number(o.vendorAcceptBy || (o.createdAt + THREE_HOURS));
+      const slaStart = getSlaStartTime(o.createdAt);
+      const acceptBy = Number(o.vendorAcceptBy || (slaStart + THREE_HOURS));
       return now > acceptBy ? "vendor_expired" : "vendor_pending";
     }
 
     if (base === "vendor_accepted") {
-      const acceptedAt = Number(o.vendorAcceptedAt || 0) || now;
+      const acceptedAt = Number(o.vendorAcceptedAt || getSlaStartTime(o.createdAt));
+
       const planBy = Number(o.adminPlanBy || (acceptedAt + THIRTY_MIN));
       return now > planBy ? "admin_overdue" : "vendor_accepted";
     }
@@ -241,7 +243,8 @@ export default function AdminOrdersMonitor() {
     const st = workflowFor(o);
 
     if (st === "vendor_pending") {
-      const acceptBy = Number(o.vendorAcceptBy || (o.createdAt + THREE_HOURS));
+      const slaStart = getSlaStartTime(o.createdAt);
+      const acceptBy = Number(o.vendorAcceptBy || (slaStart + THREE_HOURS));
       return { label: "Vendor accept in", ms: acceptBy - now };
     }
 
@@ -346,6 +349,24 @@ export default function AdminOrdersMonitor() {
     setSelected(o);
     setDetailOpen(true);
   }
+
+  function getSlaStartTime(createdAt: number) {
+  const d = new Date(createdAt);
+
+  const hour = d.getHours();
+
+  // If order after 5 PM → move to next day 10 AM
+  if (hour >= 17) {
+    const next = new Date(d);
+    next.setDate(next.getDate() + 1);
+    next.setHours(10, 0, 0, 0);
+    return next.getTime();
+  }
+
+  // Otherwise start immediately
+  return createdAt;
+}
+
 
   function openPlan(o: OrderDoc) {
     setPlanFor(o);
