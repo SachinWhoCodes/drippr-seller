@@ -27,6 +27,8 @@ import { onAuthStateChanged } from "firebase/auth";
 import { collection, onSnapshot, orderBy, query, where, limit } from "firebase/firestore";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
+// --- Types ---
+
 type LineItem = {
   title: string;
   sku?: string;
@@ -51,16 +53,15 @@ type OrderDoc = {
   orderNumber?: string;
   merchantId: string;
   createdAt: number;         // epoch ms
-  currency?: string;         // e.g. "INR"
-  financialStatus?: string;  // "paid" | "pending" | "refunded" | "voided" | ...
-  status?: string;           // "open" | "closed"
+  currency?: string;
+  financialStatus?: string;
+  status?: string;
   lineItems?: LineItem[];
   subtotal?: number;
 
   raw?: { customer?: { id?: any; email?: string } };
   customerEmail?: string | null;
 
-  // ✅ NEW WORKFLOW FIELDS (may be missing for older docs)
   workflowStatus?: WorkflowStatus;
   vendorAcceptBy?: number;
   vendorAcceptedAt?: number | null;
@@ -89,7 +90,6 @@ type OrderDoc = {
   } | null;
 };
 
-// Keep old filter options + add workflow filters (so nothing breaks)
 type UiFilter =
   | "all"
   | "pay:pending"
@@ -105,8 +105,9 @@ type UiFilter =
   | "wf:vendor_expired"
   | "wf:admin_overdue";
 
-const THREE_HOURS = 3 * 60 * 60 * 1000;
 const THIRTY_MIN = 30 * 60 * 1000;
+
+// --- Helper Functions ---
 
 function fmtCountdown(ms: number) {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -114,6 +115,26 @@ function fmtCountdown(ms: number) {
   const mm = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
   const ss = String(s % 60).padStart(2, "0");
   return `${hh}:${mm}:${ss}`;
+}
+
+// ✅ SHARED LOGIC: 5 PM Rule
+// If created after 5:00 PM (17:00), SLA starts next day at 10:00 AM
+// Returns the DEADLINE timestamp (SLA Start + 3 Hours)
+function getSlaDeadline(createdAtStr: string | number) {
+  const d = new Date(createdAtStr);
+  const hour = d.getHours();
+
+  let slaStartTime = d.getTime();
+
+  if (hour >= 17) {
+    const tomorrow = new Date(d);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(10, 0, 0, 0); // 10:00 AM
+    slaStartTime = tomorrow.getTime();
+  }
+
+  // Deadline is 3 hours after the calculated start time
+  return slaStartTime + (3 * 60 * 60 * 1000); 
 }
 
 export default function Orders() {
@@ -133,15 +154,15 @@ export default function Orders() {
     return () => unsub();
   }, []);
 
-  // live tick for timers
+  // Live timer tick
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
 
+  // Firestore subscription
   useEffect(() => {
     if (!uid) return;
-    // Recent 200 orders; adjust if needed
     const q = query(
       collection(db, "orders"),
       where("merchantId", "==", uid),
@@ -156,7 +177,7 @@ export default function Orders() {
     return () => unsub();
   }, [uid]);
 
-  // keep selected in sync as Firestore updates
+  // Keep selected order fresh
   useEffect(() => {
     if (!selected) return;
     const fresh = orders.find((o) => o.id === selected.id);
@@ -172,75 +193,37 @@ export default function Orders() {
     new Intl.NumberFormat("en-IN", { style: "currency", currency }).format(Number(v || 0));
 
   const customerFor = (o: OrderDoc) => o.customerEmail || o.raw?.customer?.email || "—";
-
   const payLabelFor = (o: OrderDoc) => (o.financialStatus || "pending").toLowerCase();
   const ordLabelFor = (o: OrderDoc) => (o.status || "open").toLowerCase();
 
-  // ✅ Workflow status (with safe fallback)
+  // --- Logic: Status Calculation ---
   const workflowFor = (o: OrderDoc): WorkflowStatus => {
-    const st = o.workflowStatus;
-    if (st) {
-      // if vendor_pending and deadline passed, display as vendor_expired (even if not written yet)
-      if (st === "vendor_pending") {
-        const acceptBy = Number(o.vendorAcceptBy || (o.createdAt + THREE_HOURS));
-        if (now > acceptBy) return "vendor_expired";
+    // 1. If already moved past pending, return actual status
+    if (o.workflowStatus === "vendor_accepted") return "vendor_accepted";
+    if (o.workflowStatus === "pickup_assigned") return "pickup_assigned";
+    if (o.workflowStatus === "dispatched") return "dispatched";
+
+    // 2. If technically "pending", check the 5 PM Rule
+    if (o.workflowStatus === "vendor_pending" || !o.workflowStatus) {
+      const deadline = getSlaDeadline(o.createdAt);
+      
+      // Return 'vendor_expired' for RED color, but logic allows action
+      if (now > deadline) {
+        return "vendor_expired";
       }
-      if (st === "vendor_accepted") {
-        const planBy = Number(o.adminPlanBy || ((o.vendorAcceptedAt || now) + THIRTY_MIN));
-        if (now > planBy) return "admin_overdue";
-      }
-      return st;
+      return "vendor_pending";
     }
 
-    // For old orders that don’t have workflow yet:
-    // show vendor_pending for max compatibility (but will likely show as expired if old).
-    const acceptBy = Number(o.vendorAcceptBy || (o.createdAt + THREE_HOURS));
-    return now > acceptBy ? "vendor_expired" : "vendor_pending";
-  };
-
-  const workflowBadgeText = (st: WorkflowStatus) => {
-    switch (st) {
-      case "vendor_pending":
-        return "Pending Acceptance";
-      case "vendor_accepted":
-        return "Accepted (Admin Planning)";
-      case "pickup_assigned":
-        return "Pickup Assigned";
-      case "dispatched":
-        return "Dispatched";
-      case "vendor_expired":
-        return "Expired";
-      case "admin_overdue":
-        return "Admin Overdue";
-      default:
-        return st;
-    }
-  };
-
-  const workflowBadgeClass = (st: WorkflowStatus) => {
-    if (st === "vendor_pending") return "bg-warning/10 text-warning border-warning/20";
-    if (st === "vendor_accepted") return "bg-primary/10 text-primary border-primary/20";
-    if (st === "pickup_assigned") return "bg-success/10 text-success border-success/20";
-    if (st === "dispatched") return "bg-success/10 text-success border-success/20";
-    if (st === "vendor_expired" || st === "admin_overdue") return "bg-destructive/10 text-destructive border-destructive/20";
-    return "bg-muted text-muted-foreground border-muted";
-  };
-
-  // payment badge colors (existing behavior)
-  const payBadgeClass = (o: OrderDoc) => {
-    const l = payLabelFor(o);
-    if (l === "paid") return "bg-success/10 text-success border-success/20";
-    if (l === "pending" || l === "authorized") return "bg-warning/10 text-warning border-warning/20";
-    if (l === "refunded" || l === "voided") return "bg-destructive/10 text-destructive border-destructive/20";
-    return "bg-muted text-muted-foreground border-muted";
+    return "vendor_pending";
   };
 
   const timeLeftMs = (o: OrderDoc): { label: string; ms: number } | null => {
     const st = workflowFor(o);
 
-    if (st === "vendor_pending") {
-      const acceptBy = Number(o.vendorAcceptBy || (o.createdAt + THREE_HOURS));
-      return { label: "Accept in", ms: acceptBy - now };
+    // Show timer for both Pending AND Expired
+    if (st === "vendor_pending" || st === "vendor_expired") {
+      const deadline = getSlaDeadline(o.createdAt);
+      return { label: "Accept in", ms: deadline - now };
     }
 
     if (st === "vendor_accepted" || st === "admin_overdue") {
@@ -252,16 +235,24 @@ export default function Orders() {
     return null;
   };
 
+  // --- Filtering Logic ---
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
 
     return orders.filter((o) => {
-      // filter by selected filter
+      const currentStatus = workflowFor(o);
+
       if (filter !== "all") {
         const [kind, val] = filter.split(":") as [string, string];
 
         if (kind === "wf") {
-          if (workflowFor(o) !== (val as WorkflowStatus)) return false;
+          // SPECIAL HANDLING: "Pending" filter shows "Pending" + "Expired"
+          if (val === 'vendor_pending') {
+             if (currentStatus !== 'vendor_pending' && currentStatus !== 'vendor_expired') return false;
+          } else {
+             // Exact match for others
+             if (currentStatus !== val) return false;
+          }
         } else if (kind === "pay") {
           if (payLabelFor(o) !== val) return false;
         } else if (kind === "ord") {
@@ -270,18 +261,18 @@ export default function Orders() {
       }
 
       if (!q) return true;
-
       const itemsText = (o.lineItems || []).map((li) => `${li.title} x${li.quantity}`).join(" ");
       const hay = `${o.orderNumber || o.shopifyOrderId} ${customerFor(o)} ${itemsText}`.toLowerCase();
       return hay.includes(q);
     });
-  }, [orders, search, filter, now]); // include now for workflowFor()
+  }, [orders, search, filter, now]);
 
   const handleViewOrder = (o: OrderDoc) => {
     setSelected(o);
     setDetailOpen(true);
   };
 
+  // --- API Calls ---
   async function authedJsonPost(url: string, body: any) {
     const u = auth.currentUser;
     if (!u) throw new Error("Not logged in");
@@ -302,32 +293,24 @@ export default function Orders() {
     const token = await u.getIdToken();
 
     const url = urlFromDoc || `/api/orders/invoice?orderId=${encodeURIComponent(orderId)}`;
-
     const r = await fetch(url, {
       method: "GET",
       headers: { Authorization: `Bearer ${token}` },
     });
 
     if (!r.ok) {
-      let msg = "Failed to download invoice";
-      try {
-        const j = await r.json();
-        msg = j?.error || msg;
-      } catch {}
-      toast.error(msg);
+      toast.error("Failed to download invoice");
       return;
     }
 
     const blob = await r.blob();
     const objectUrl = window.URL.createObjectURL(blob);
-
     const a = document.createElement("a");
     a.href = objectUrl;
     a.download = `billing-slip_${selected?.orderNumber || selected?.shopifyOrderId || orderId}.pdf`;
     document.body.appendChild(a);
     a.click();
     a.remove();
-
     window.URL.revokeObjectURL(objectUrl);
   }
 
@@ -357,6 +340,37 @@ export default function Orders() {
     }
   }
 
+  // --- Styling Helpers ---
+  const workflowBadgeText = (st: WorkflowStatus) => {
+    switch (st) {
+      case "vendor_pending": return "Pending Acceptance";
+      case "vendor_expired": return "Expired (Action Required)";
+      case "vendor_accepted": return "Accepted (Admin Planning)";
+      case "pickup_assigned": return "Pickup Assigned";
+      case "dispatched": return "Dispatched";
+      case "admin_overdue": return "Admin Overdue";
+      default: return st;
+    }
+  };
+
+  const workflowBadgeClass = (st: WorkflowStatus) => {
+    if (st === "vendor_pending") return "bg-warning/10 text-warning border-warning/20";
+    if (st === "vendor_accepted") return "bg-primary/10 text-primary border-primary/20";
+    if (st === "pickup_assigned") return "bg-success/10 text-success border-success/20";
+    if (st === "dispatched") return "bg-success/10 text-success border-success/20";
+    // Red for expired/overdue
+    if (st === "vendor_expired" || st === "admin_overdue") return "bg-destructive/10 text-destructive border-destructive/20";
+    return "bg-muted text-muted-foreground border-muted";
+  };
+
+  const payBadgeClass = (o: OrderDoc) => {
+    const l = payLabelFor(o);
+    if (l === "paid") return "bg-success/10 text-success border-success/20";
+    if (l === "pending" || l === "authorized") return "bg-warning/10 text-warning border-warning/20";
+    if (l === "refunded" || l === "voided") return "bg-destructive/10 text-destructive border-destructive/20";
+    return "bg-muted text-muted-foreground border-muted";
+  };
+
   return (
     <DashboardLayout>
       <div className="space-y-6">
@@ -377,20 +391,13 @@ export default function Orders() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="all">All Orders</SelectItem>
-
-                    {/* Workflow filters */}
-                    <SelectItem value="wf:vendor_pending">Workflow: Pending Acceptance</SelectItem>
-                    <SelectItem value="wf:vendor_accepted">Workflow: Accepted (Admin Planning)</SelectItem>
+                    <SelectItem value="wf:vendor_pending">Workflow: Pending & Expired</SelectItem>
+                    <SelectItem value="wf:vendor_accepted">Workflow: Accepted</SelectItem>
                     <SelectItem value="wf:pickup_assigned">Workflow: Pickup Assigned</SelectItem>
                     <SelectItem value="wf:dispatched">Workflow: Dispatched</SelectItem>
-                    <SelectItem value="wf:vendor_expired">Workflow: Expired</SelectItem>
-                    <SelectItem value="wf:admin_overdue">Workflow: Admin Overdue</SelectItem>
-
-                    {/* Payment / Order filters (previous logic preserved) */}
+                    
                     <SelectItem value="pay:pending">Payment: Pending</SelectItem>
                     <SelectItem value="pay:paid">Payment: Paid</SelectItem>
-                    <SelectItem value="pay:refunded">Payment: Refunded</SelectItem>
-                    <SelectItem value="pay:voided">Payment: Voided</SelectItem>
                     <SelectItem value="ord:open">Order: Open</SelectItem>
                     <SelectItem value="ord:closed">Order: Closed</SelectItem>
                   </SelectContent>
@@ -431,20 +438,12 @@ export default function Orders() {
 
                     return (
                       <TableRow key={o.id}>
-                        <TableCell className="font-medium">
-                          {o.orderNumber || o.shopifyOrderId}
-                        </TableCell>
-
+                        <TableCell className="font-medium">{o.orderNumber || o.shopifyOrderId}</TableCell>
                         <TableCell>{customerFor(o)}</TableCell>
-
                         <TableCell className="max-w-xs truncate">
-                          {(o.lineItems || [])
-                            .map((li) => `${li.title} × ${li.quantity}`)
-                            .join(", ")}
+                          {(o.lineItems || []).map((li) => `${li.title} × ${li.quantity}`).join(", ")}
                         </TableCell>
-
                         <TableCell className="font-semibold">{money(o.subtotal)}</TableCell>
-
                         <TableCell>{new Date(o.createdAt).toLocaleString()}</TableCell>
 
                         <TableCell>
@@ -458,12 +457,11 @@ export default function Orders() {
                                     {tl.label}: <span className="font-medium">{fmtCountdown(tl.ms)}</span>
                                   </>
                                 ) : (
-                                  <span className="text-destructive">Overdue</span>
+                                  <span className="text-destructive font-semibold">Overdue</span>
                                 )}
                               </div>
                             ) : null}
 
-                            {/* small payment badge (keeps old visibility) */}
                             <div>
                               <Badge className={payBadgeClass(o)}>{payLabelFor(o)}</Badge>
                             </div>
@@ -493,72 +491,67 @@ export default function Orders() {
         </Card>
       </div>
 
-      {/* Order details dialog */}
+      {/* DETAIL DIALOG */}
       <Dialog open={detailOpen} onOpenChange={setDetailOpen}>
         <DialogContent className="max-w-3xl">
           <DialogHeader>
-            <DialogTitle>
-              Order {selected?.orderNumber || selected?.shopifyOrderId}
-            </DialogTitle>
+            <DialogTitle>Order {selected?.orderNumber || selected?.shopifyOrderId}</DialogTitle>
           </DialogHeader>
 
           {selected ? (() => {
             const wf = workflowFor(selected);
             const tl = timeLeftMs(selected);
-            const canAccept = wf === "vendor_pending" && !!tl && tl.ms > 0;
+            
+            // ✅ UNBLOCKED: Can Accept if Pending OR Expired
+            const canAccept = wf === "vendor_pending" || wf === "vendor_expired";
+            // Dispatch requires strict Pickup Assigned state (enforced by API)
             const canDispatch = wf === "pickup_assigned";
 
             return (
               <div className="space-y-5">
-                {/* Top info */}
+                {/* Top Info Grid */}
                 <div className="grid grid-cols-2 gap-4 text-sm">
                   <div>
                     <div className="text-muted-foreground">Date</div>
                     <div>{new Date(selected.createdAt).toLocaleString()}</div>
                   </div>
-
                   <div>
                     <div className="text-muted-foreground">Customer</div>
                     <div>{customerFor(selected)}</div>
                   </div>
-
                   <div>
                     <div className="text-muted-foreground">Workflow Status</div>
                     <div className="flex items-center gap-2">
                       <Badge className={workflowBadgeClass(wf)}>{workflowBadgeText(wf)}</Badge>
                       {tl ? (
-                        <span className="text-xs text-muted-foreground">
+                        <span className={`text-xs ${tl.ms > 0 ? "text-muted-foreground" : "text-destructive font-semibold"}`}>
                           {tl.ms > 0 ? `${tl.label}: ${fmtCountdown(tl.ms)}` : "Overdue"}
                         </span>
                       ) : null}
                     </div>
                   </div>
-
                   <div>
                     <div className="text-muted-foreground">Payment</div>
                     <div className="flex items-center gap-2">
                       <Badge className={payBadgeClass(selected)}>{payLabelFor(selected)}</Badge>
-                      <span className="text-xs text-muted-foreground">
-                        {ordLabelFor(selected)}
-                      </span>
+                      <span className="text-xs text-muted-foreground">{ordLabelFor(selected)}</span>
                     </div>
                   </div>
-
                   <div>
                     <div className="text-muted-foreground">Amount</div>
                     <div className="font-semibold">{money(selected.subtotal)}</div>
                   </div>
-
                   <div>
                     <div className="text-muted-foreground">Order ID</div>
                     <div className="text-xs">{selected.shopifyOrderId}</div>
                   </div>
                 </div>
 
-                {/* Actions */}
+                {/* Actions Toolbar */}
                 <div className="flex flex-col sm:flex-row gap-3">
                   <Button
                     onClick={onAcceptSelected}
+                    // Only disabled if processing or if state is already advanced
                     disabled={!canAccept || actionBusy}
                     className="w-full sm:w-auto"
                   >
@@ -579,6 +572,7 @@ export default function Orders() {
                   <Button
                     variant="outline"
                     onClick={() => downloadInvoice(selected.id, selected.invoice?.url)}
+                    // Allow invoice download if URL exists (usually after acceptance)
                     disabled={!selected.invoice?.url || actionBusy}
                     className="w-full sm:w-auto"
                   >
@@ -587,11 +581,12 @@ export default function Orders() {
                   </Button>
                 </div>
 
-                {/* Pickup / Partner details (visible after admin assigns pickup) */}
+                {/* Pickup & Delivery Details (If available) */}
                 {(wf === "pickup_assigned" || wf === "dispatched") && (
-                  <div className="border rounded-md p-3 space-y-2 text-sm">
-                    <div className="font-medium">Pickup & Delivery Details</div>
-
+                  <div className="border rounded-md p-3 space-y-2 text-sm bg-muted/20">
+                    <div className="font-medium flex items-center gap-2">
+                      <Truck className="h-4 w-4" /> Pickup & Delivery Details
+                    </div>
                     {selected.pickupPlan ? (
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         <div>
@@ -608,11 +603,11 @@ export default function Orders() {
                         </div>
                       </div>
                     ) : (
-                      <div className="text-muted-foreground">Pickup plan not shared yet.</div>
+                      <div className="text-muted-foreground">Pickup details pending.</div>
                     )}
 
-                    {selected.deliveryPartner ? (
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-2">
+                    {selected.deliveryPartner && (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-2 border-t pt-2">
                         <div>
                           <div className="text-muted-foreground">Delivery Partner</div>
                           <div>{selected.deliveryPartner.name || "—"}</div>
@@ -628,32 +623,25 @@ export default function Orders() {
                         <div>
                           <div className="text-muted-foreground">Tracking</div>
                           {selected.deliveryPartner.trackingUrl ? (
-                            <a
-                              href={selected.deliveryPartner.trackingUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="text-primary underline"
-                            >
-                              Open tracking link
+                            <a href={selected.deliveryPartner.trackingUrl} target="_blank" rel="noreferrer" className="text-primary underline">
+                              Open Link
                             </a>
                           ) : (
                             <div>—</div>
                           )}
                         </div>
                       </div>
-                    ) : (
-                      <div className="text-muted-foreground mt-2">Delivery partner not assigned yet.</div>
                     )}
-
-                    {selected.dispatchedAt ? (
-                      <div className="text-xs text-muted-foreground mt-2">
-                        Dispatched at: {new Date(selected.dispatchedAt).toLocaleString()}
-                      </div>
-                    ) : null}
+                    
+                    {selected.dispatchedAt && (
+                       <div className="text-xs text-muted-foreground mt-2 border-t pt-2">
+                          Dispatched: {new Date(selected.dispatchedAt).toLocaleString()}
+                       </div>
+                    )}
                   </div>
                 )}
 
-                {/* Items table */}
+                {/* Items Table */}
                 <div className="border rounded-md">
                   <Table>
                     <TableHeader>
@@ -670,9 +658,7 @@ export default function Orders() {
                           <TableCell>
                             <div className="flex flex-col">
                               <div className="font-medium">{li.title}</div>
-                              {li.sku ? (
-                                <div className="text-xs text-muted-foreground">SKU: {li.sku}</div>
-                              ) : null}
+                              {li.sku && <div className="text-xs text-muted-foreground">SKU: {li.sku}</div>}
                             </div>
                           </TableCell>
                           <TableCell className="text-right">{li.quantity}</TableCell>
@@ -682,15 +668,13 @@ export default function Orders() {
                       ))}
                       {(selected.lineItems || []).length === 0 && (
                         <TableRow>
-                          <TableCell colSpan={4} className="text-center text-muted-foreground">
-                            No items.
-                          </TableCell>
+                          <TableCell colSpan={4} className="text-center text-muted-foreground">No items.</TableCell>
                         </TableRow>
                       )}
                     </TableBody>
                   </Table>
                 </div>
-
+                
                 <div className="text-xs text-muted-foreground">
                   Shopify Order ID: {selected.shopifyOrderId}
                 </div>
@@ -702,4 +686,3 @@ export default function Orders() {
     </DashboardLayout>
   );
 }
-
