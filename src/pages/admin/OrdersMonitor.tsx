@@ -28,8 +28,13 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged } from "firebase/auth";
 import { collection, limit, onSnapshot, orderBy, query } from "firebase/firestore";
+import {
+  addBusinessHours,
+  getRemainingBusinessTime,
+  isCurrentlyOfficeHours,
+  getOfficeStatusMessage
+} from "@/lib/officeHours";
 
-// --- Types ---
 type LineItem = {
   title: string;
   sku?: string;
@@ -50,32 +55,43 @@ type OrderDoc = {
   id: string;
   shopifyOrderId: string;
   orderNumber?: string;
+
   merchantId: string;
+
   createdAt: number;
   subtotal?: number;
   currency?: string;
-  status?: string;
+
+  status?: string; // open/closed
   financialStatus?: string;
+
   customerEmail?: string | null;
   raw?: { customer?: { email?: string } };
+
   lineItems?: LineItem[];
+
   workflowStatus?: WorkflowStatus;
   vendorAcceptBy?: number;
   vendorAcceptedAt?: number | null;
+
   adminPlanBy?: number | null;
   adminPlannedAt?: number | null;
+
   pickupPlan?: {
     pickupWindow?: string | null;
     pickupAddress?: string | null;
     notes?: string | null;
   } | null;
+
   deliveryPartner?: {
     name?: string | null;
     phone?: string | null;
     etaText?: string | null;
     trackingUrl?: string | null;
   } | null;
+
   dispatchedAt?: number | null;
+
   invoice?: {
     status?: "none" | "generating" | "ready";
     url?: string;
@@ -96,29 +112,12 @@ type Filter =
 const THREE_HOURS = 3 * 60 * 60 * 1000;
 const THIRTY_MIN = 30 * 60 * 1000;
 
-// --- Helper Functions ---
-
 function fmtCountdown(ms: number) {
   const s = Math.max(0, Math.floor(ms / 1000));
   const hh = String(Math.floor(s / 3600)).padStart(2, "0");
   const mm = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
   const ss = String(s % 60).padStart(2, "0");
   return `${hh}:${mm}:${ss}`;
-}
-
-// ✅ SHARED LOGIC: 5 PM Rule
-// If order created after 5 PM (17:00), SLA clock starts next day 10:00 AM
-function getSlaStartTime(createdAt: number) {
-  const d = new Date(createdAt);
-  const hour = d.getHours();
-
-  if (hour >= 17) {
-    const next = new Date(d);
-    next.setDate(next.getDate() + 1);
-    next.setHours(10, 0, 0, 0); // 10:00 AM next day
-    return next.getTime();
-  }
-  return createdAt;
 }
 
 export default function AdminOrdersMonitor() {
@@ -134,12 +133,14 @@ export default function AdminOrdersMonitor() {
 
   const [planOpen, setPlanOpen] = useState(false);
   const [planFor, setPlanFor] = useState<OrderDoc | null>(null);
+
   const [busy, setBusy] = useState(false);
 
   // Plan form
   const [pickupWindow, setPickupWindow] = useState("");
   const [pickupAddress, setPickupAddress] = useState("");
   const [notes, setNotes] = useState("");
+
   const [partnerName, setPartnerName] = useState("");
   const [partnerPhone, setPartnerPhone] = useState("");
   const [etaText, setEtaText] = useState("");
@@ -155,8 +156,10 @@ export default function AdminOrdersMonitor() {
     return () => clearInterval(id);
   }, []);
 
+  // 🔥 Admin global watcher: all orders (recent N)
   useEffect(() => {
     if (!uid) return;
+
     const q = query(collection(db, "orders"), orderBy("createdAt", "desc"), limit(500));
     const unsub = onSnapshot(
       q,
@@ -170,9 +173,11 @@ export default function AdminOrdersMonitor() {
         toast.error("Failed to load orders");
       }
     );
+
     return () => unsub();
   }, [uid]);
 
+  // keep selected fresh
   useEffect(() => {
     if (!selected) return;
     const fresh = orders.find((o) => o.id === selected.id);
@@ -186,21 +191,35 @@ export default function AdminOrdersMonitor() {
 
   const customerFor = (o: OrderDoc) => o.customerEmail || o.raw?.customer?.email || "—";
 
-  // --- Logic: Status Calculation ---
+  // ✅ Calculate deadline with business hours
+  const getVendorAcceptByDeadline = (o: OrderDoc): number => {
+    if (o.vendorAcceptBy) {
+      return o.vendorAcceptBy;
+    }
+    return addBusinessHours(o.createdAt, THREE_HOURS);
+  };
+
+  const getAdminPlanByDeadline = (o: OrderDoc): number => {
+    if (o.adminPlanBy) {
+      return o.adminPlanBy;
+    }
+    const acceptedAt = o.vendorAcceptedAt || now;
+    return addBusinessHours(acceptedAt, THIRTY_MIN);
+  };
+
   const workflowFor = (o: OrderDoc): WorkflowStatus => {
     const stored = o.workflowStatus;
+
+    // Treat missing as vendor_pending for backward compatibility
     const base = stored || "vendor_pending";
 
     if (base === "vendor_pending") {
-      const slaStart = getSlaStartTime(o.createdAt);
-      const acceptBy = Number(o.vendorAcceptBy || (slaStart + THREE_HOURS));
-      // Returns 'vendor_expired' strictly for COLOR, but actions are unblocked below
+      const acceptBy = getVendorAcceptByDeadline(o);
       return now > acceptBy ? "vendor_expired" : "vendor_pending";
     }
 
     if (base === "vendor_accepted") {
-      const acceptedAt = Number(o.vendorAcceptedAt || getSlaStartTime(o.createdAt));
-      const planBy = Number(o.adminPlanBy || (acceptedAt + THIRTY_MIN));
+      const planBy = getAdminPlanByDeadline(o);
       return now > planBy ? "admin_overdue" : "vendor_accepted";
     }
 
@@ -212,37 +231,46 @@ export default function AdminOrdersMonitor() {
 
   const badgeText = (st: WorkflowStatus) => {
     switch (st) {
-      case "vendor_pending": return "Pending (Vendor)";
-      case "vendor_expired": return "Expired";
-      case "vendor_accepted": return "Accepted";
-      case "admin_overdue": return "Admin Overdue";
-      case "pickup_assigned": return "Pickup Assigned";
-      case "dispatched": return "Dispatched";
-      default: return st;
+      case "vendor_pending":
+        return "Pending (Vendor)";
+      case "vendor_expired":
+        return "Expired";
+      case "vendor_accepted":
+        return "Accepted";
+      case "admin_overdue":
+        return "Admin Overdue";
+      case "pickup_assigned":
+        return "Pickup Assigned";
+      case "dispatched":
+        return "Dispatched";
+      default:
+        return st;
     }
   };
 
   const badgeClass = (st: WorkflowStatus) => {
     if (st === "vendor_pending") return "bg-warning/10 text-warning border-warning/20";
     if (st === "vendor_accepted") return "bg-primary/10 text-primary border-primary/20";
-    if (st === "pickup_assigned" || st === "dispatched") return "bg-success/10 text-success border-success/20";
-    if (st === "vendor_expired" || st === "admin_overdue") return "bg-destructive/10 text-destructive border-destructive/20";
+    if (st === "pickup_assigned" || st === "dispatched")
+      return "bg-success/10 text-success border-success/20";
+    if (st === "vendor_expired" || st === "admin_overdue")
+      return "bg-destructive/10 text-destructive border-destructive/20";
     return "bg-muted text-muted-foreground border-muted";
   };
 
   const timerFor = (o: OrderDoc): { label: string; ms: number } | null => {
     const st = workflowFor(o);
 
-    if (st === "vendor_pending" || st === "vendor_expired") {
-      const slaStart = getSlaStartTime(o.createdAt);
-      const acceptBy = Number(o.vendorAcceptBy || (slaStart + THREE_HOURS));
-      return { label: "Vendor accept in", ms: acceptBy - now };
+    if (st === "vendor_pending") {
+      const acceptBy = getVendorAcceptByDeadline(o);
+      const remaining = getRemainingBusinessTime(acceptBy, now);
+      return { label: "Vendor accept in", ms: remaining };
     }
 
     if (st === "vendor_accepted" || st === "admin_overdue") {
-      const acceptedAt = Number(o.vendorAcceptedAt || 0) || now;
-      const planBy = Number(o.adminPlanBy || (acceptedAt + THIRTY_MIN));
-      return { label: "Admin plan in", ms: planBy - now };
+      const planBy = getAdminPlanByDeadline(o);
+      const remaining = getRemainingBusinessTime(planBy, now);
+      return { label: "Admin plan in", ms: remaining };
     }
 
     return null;
@@ -259,24 +287,26 @@ export default function AdminOrdersMonitor() {
     };
     orders.forEach((o) => c[workflowFor(o)]++);
     return c;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orders, now]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
+
     return orders.filter((o) => {
       const st = workflowFor(o);
+
       if (filter !== "all") {
         if (filter === "needs_planning") {
-           // Loose filter: show anything that isn't dispatched or assigned yet? 
-           // Or strictly accepted? Let's keep it strictly accepted/overdue for the filter, 
-           // but the 'All' list allows action on any.
           if (!(st === "vendor_accepted" || st === "admin_overdue")) return false;
         } else if (filter.startsWith("wf:")) {
           const want = filter.replace("wf:", "") as WorkflowStatus;
           if (st !== want) return false;
         }
       }
+
       if (!q) return true;
+
       const itemsText = (o.lineItems || []).map((li) => li.title).join(" ");
       const hay = `${o.orderNumber || ""} ${o.shopifyOrderId || ""} ${o.merchantId || ""} ${customerFor(o)} ${itemsText}`.toLowerCase();
       return hay.includes(q);
@@ -287,11 +317,13 @@ export default function AdminOrdersMonitor() {
     const u = auth.currentUser;
     if (!u) throw new Error("Not logged in");
     const token = await u.getIdToken();
+
     const r = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       body: JSON.stringify(body),
     });
+
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(data?.error || "Request failed");
     return data;
@@ -300,24 +332,35 @@ export default function AdminOrdersMonitor() {
   async function downloadInvoice(orderId: string, urlFromDoc?: string) {
     const u = auth.currentUser;
     if (!u) return toast.error("Please login again");
+
     const token = await u.getIdToken();
     const url = urlFromDoc || `/api/orders/invoice?orderId=${encodeURIComponent(orderId)}`;
+
     const r = await fetch(url, {
       method: "GET",
       headers: { Authorization: `Bearer ${token}` },
     });
+
     if (!r.ok) {
-      toast.error("Failed to download invoice");
+      let msg = "Failed to download invoice";
+      try {
+        const j = await r.json();
+        msg = j?.error || msg;
+      } catch {}
+      toast.error(msg);
       return;
     }
+
     const blob = await r.blob();
     const objectUrl = window.URL.createObjectURL(blob);
+
     const a = document.createElement("a");
     a.href = objectUrl;
     a.download = `billing-slip_${orderId}.pdf`;
     document.body.appendChild(a);
     a.click();
     a.remove();
+
     window.URL.revokeObjectURL(objectUrl);
   }
 
@@ -329,6 +372,7 @@ export default function AdminOrdersMonitor() {
   function openPlan(o: OrderDoc) {
     setPlanFor(o);
     setPlanOpen(true);
+
     setPickupWindow("");
     setPickupAddress("");
     setNotes("");
@@ -340,6 +384,7 @@ export default function AdminOrdersMonitor() {
 
   async function submitPlan() {
     if (!planFor) return;
+
     setBusy(true);
     try {
       await authedJsonPost("/api/admin/assign-pickup", {
@@ -354,6 +399,7 @@ export default function AdminOrdersMonitor() {
           trackingUrl,
         },
       });
+
       toast.success("Pickup assigned successfully");
       setPlanOpen(false);
       setPlanFor(null);
@@ -364,6 +410,9 @@ export default function AdminOrdersMonitor() {
     }
   }
 
+  const officeStatus = getOfficeStatusMessage();
+  const isOfficeOpen = isCurrentlyOfficeHours();
+
   return (
     <>
       <div className="space-y-6">
@@ -372,6 +421,21 @@ export default function AdminOrdersMonitor() {
           <p className="text-muted-foreground">Admin view of all orders end-to-end</p>
         </div>
 
+        {/* Office Hours Status Banner */}
+        <Card className={isOfficeOpen ? "border-green-200 bg-green-50" : "border-orange-200 bg-orange-50"}>
+          <CardContent className="py-3">
+            <div className="flex items-center gap-2">
+              <Clock className={`h-4 w-4 ${isOfficeOpen ? "text-green-600" : "text-orange-600"}`} />
+              <span className={`text-sm font-medium ${isOfficeOpen ? "text-green-800" : "text-orange-800"}`}>
+                {officeStatus}
+              </span>
+              <span className="text-xs text-muted-foreground ml-2">
+                (Office hours: 10 AM - 5 PM)
+              </span>
+            </div>
+          </CardContent>
+        </Card>
+
         <Card>
           <CardHeader>
             <div className="flex flex-col gap-3">
@@ -379,7 +443,6 @@ export default function AdminOrdersMonitor() {
                 <div className="space-y-1">
                   <CardTitle>All Orders</CardTitle>
                   <div className="text-sm text-muted-foreground flex flex-wrap gap-3 items-center">
-                     {/* Counts Display */}
                     <span className="flex items-center gap-1">
                       <Clock className="h-4 w-4" /> Pending: <b>{counts.vendor_pending}</b>
                     </span>
@@ -408,7 +471,7 @@ export default function AdminOrdersMonitor() {
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="all">All</SelectItem>
-                      <SelectItem value="needs_planning">Needs Planning</SelectItem>
+                      <SelectItem value="needs_planning">Needs Planning (Accepted)</SelectItem>
                       <SelectItem value="wf:vendor_pending">Workflow: Pending</SelectItem>
                       <SelectItem value="wf:vendor_expired">Workflow: Expired</SelectItem>
                       <SelectItem value="wf:vendor_accepted">Workflow: Accepted</SelectItem>
@@ -421,7 +484,7 @@ export default function AdminOrdersMonitor() {
                   <div className="relative w-full sm:w-72">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                     <Input
-                      placeholder="Search..."
+                      placeholder="Search order / merchant / customer / item..."
                       className="pl-9"
                       value={search}
                       onChange={(e) => setSearch(e.target.value)}
@@ -452,43 +515,52 @@ export default function AdminOrdersMonitor() {
                   {filtered.map((o) => {
                     const st = workflowFor(o);
                     const t = timerFor(o);
-                    
-                    // ✅ UNBLOCKED: Allow Plan if not yet dispatched/assigned
-                    const canPlan = st !== "dispatched" && st !== "pickup_assigned";
-                    
+                    const canPlan = st === "vendor_accepted" || st === "admin_overdue";
                     const canInvoice =
-                      st !== "vendor_pending" && st !== "vendor_expired"; // Usually invoice only after accept
+                      st === "vendor_accepted" || st === "admin_overdue" || st === "pickup_assigned" || st === "dispatched";
 
                     return (
                       <TableRow key={o.id}>
                         <TableCell className="font-medium">
                           {o.orderNumber || o.shopifyOrderId || o.id}
                         </TableCell>
+
                         <TableCell className="text-xs">{o.merchantId}</TableCell>
+
                         <TableCell>{customerFor(o)}</TableCell>
+
                         <TableCell className="font-semibold">{money(o.subtotal)}</TableCell>
+
                         <TableCell>{new Date(o.createdAt || Date.now()).toLocaleString()}</TableCell>
+
                         <TableCell>
                           <Badge className={badgeClass(st)}>{badgeText(st)}</Badge>
                         </TableCell>
+
                         <TableCell>
                           {t ? (
                             <div className="flex flex-col gap-1">
                               <div className="text-xs text-muted-foreground">{t.label}</div>
                               <div className={t.ms > 0 ? "font-medium" : "font-medium text-destructive"}>
-                                {t.ms > 0 ? fmtCountdown(t.ms) : "Overdue"}
+                                {t.ms > 0 ? (
+                                  <>
+                                    {fmtCountdown(t.ms)}
+                                    {!isOfficeOpen && <span className="text-orange-600 text-xs ml-1">(Paused)</span>}
+                                  </>
+                                ) : "Overdue"}
                               </div>
                             </div>
                           ) : (
                             <span className="text-muted-foreground">—</span>
                           )}
                         </TableCell>
+
                         <TableCell className="text-right">
                           <div className="flex gap-2 justify-end">
                             <Button variant="ghost" size="icon" onClick={() => openDetails(o)}>
                               <Eye className="h-4 w-4" />
                             </Button>
-                            
+
                             <Button onClick={() => openPlan(o)} disabled={!canPlan || busy}>
                               <ClipboardList className="h-4 w-4 mr-2" />
                               Plan Pickup
@@ -507,6 +579,7 @@ export default function AdminOrdersMonitor() {
                       </TableRow>
                     );
                   })}
+
                   {filtered.length === 0 && (
                     <TableRow>
                       <TableCell colSpan={8} className="text-center text-muted-foreground">
@@ -521,34 +594,163 @@ export default function AdminOrdersMonitor() {
         </Card>
       </div>
 
-      {/* DETAILS DIALOG (Kept mostly same) */}
+      {/* DETAILS */}
       <Dialog open={detailOpen} onOpenChange={setDetailOpen}>
         <DialogContent className="max-w-3xl">
           <DialogHeader>
-            <DialogTitle>Order Details</DialogTitle>
+            <DialogTitle>
+              Order Details — {selected?.orderNumber || selected?.shopifyOrderId || selected?.id}
+            </DialogTitle>
           </DialogHeader>
+
           {selected && (
-             <div className="space-y-4 text-sm">
-                {/* ... (Details content remains same as original) ... */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div><div className="text-muted-foreground">Workflow</div><Badge className={badgeClass(workflowFor(selected))}>{badgeText(workflowFor(selected))}</Badge></div>
+            <div className="space-y-4 text-sm">
+              {/* Office hours notice */}
+              {!isOfficeOpen && (workflowFor(selected) === "vendor_pending" || workflowFor(selected) === "vendor_accepted") && (
+                <div className="border border-orange-200 bg-orange-50 rounded-md p-3">
+                  <div className="flex items-center gap-2 text-orange-800">
+                    <Clock className="h-4 w-4" />
+                    <span className="font-medium">{officeStatus}</span>
+                  </div>
+                  <div className="text-orange-700 text-xs mt-1">
+                    Timer is paused outside office hours and will resume at 10 AM
+                  </div>
                 </div>
-                 {/* ... table and other details ... */}
-             </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <div className="text-muted-foreground">Merchant</div>
+                  <div className="text-xs">{selected.merchantId}</div>
+                </div>
+                <div>
+                  <div className="text-muted-foreground">Customer</div>
+                  <div>{customerFor(selected)}</div>
+                </div>
+                <div>
+                  <div className="text-muted-foreground">Created</div>
+                  <div>{new Date(selected.createdAt || Date.now()).toLocaleString()}</div>
+                </div>
+                <div>
+                  <div className="text-muted-foreground">Workflow</div>
+                  <div>
+                    <Badge className={badgeClass(workflowFor(selected))}>
+                      {badgeText(workflowFor(selected))}
+                    </Badge>
+                  </div>
+                </div>
+              </div>
+
+              <div className="border rounded-md">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Item</TableHead>
+                      <TableHead className="w-24 text-right">Qty</TableHead>
+                      <TableHead className="w-28 text-right">Price</TableHead>
+                      <TableHead className="w-28 text-right">Total</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {(selected.lineItems || []).map((li, idx) => (
+                      <TableRow key={idx}>
+                        <TableCell>
+                          <div className="flex flex-col">
+                            <div className="font-medium">{li.title}</div>
+                            {li.sku ? (
+                              <div className="text-xs text-muted-foreground">SKU: {li.sku}</div>
+                            ) : null}
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-right">{li.quantity}</TableCell>
+                        <TableCell className="text-right">{money(li.price)}</TableCell>
+                        <TableCell className="text-right">{money(li.total)}</TableCell>
+                      </TableRow>
+                    ))}
+                    {(selected.lineItems || []).length === 0 && (
+                      <TableRow>
+                        <TableCell colSpan={4} className="text-center text-muted-foreground">
+                          No items
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
+
+              {(selected.pickupPlan || selected.deliveryPartner) && (
+                <div className="border rounded-md p-3 space-y-2">
+                  <div className="font-medium">Pickup & Delivery</div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <div className="text-muted-foreground">Pickup Window</div>
+                      <div>{selected.pickupPlan?.pickupWindow || "—"}</div>
+                    </div>
+                    <div>
+                      <div className="text-muted-foreground">Pickup Address</div>
+                      <div>{selected.pickupPlan?.pickupAddress || "—"}</div>
+                    </div>
+                    <div>
+                      <div className="text-muted-foreground">Partner</div>
+                      <div>{selected.deliveryPartner?.name || "—"}</div>
+                    </div>
+                    <div>
+                      <div className="text-muted-foreground">Phone</div>
+                      <div>{selected.deliveryPartner?.phone || "—"}</div>
+                    </div>
+                    <div>
+                      <div className="text-muted-foreground">ETA</div>
+                      <div>{selected.deliveryPartner?.etaText || "—"}</div>
+                    </div>
+                    <div>
+                      <div className="text-muted-foreground">Tracking</div>
+                      {selected.deliveryPartner?.trackingUrl ? (
+                        <a
+                          href={selected.deliveryPartner.trackingUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-primary underline"
+                        >
+                          Open tracking link
+                        </a>
+                      ) : (
+                        <div>—</div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
           )}
         </DialogContent>
       </Dialog>
 
-      {/* PLAN PICKUP DIALOG */}
+      {/* PLAN PICKUP */}
       <Dialog open={planOpen} onOpenChange={setPlanOpen}>
         <DialogContent className="max-w-3xl">
           <DialogHeader>
-            <DialogTitle>Plan Pickup</DialogTitle>
+            <DialogTitle>
+              Plan Pickup — {planFor?.orderNumber || planFor?.shopifyOrderId || planFor?.id}
+            </DialogTitle>
           </DialogHeader>
+
           {planFor && (
             <div className="space-y-4">
+              {/* Office hours notice */}
+              {!isOfficeOpen && (
+                <div className="border border-orange-200 bg-orange-50 rounded-md p-3 text-sm">
+                  <div className="flex items-center gap-2 text-orange-800">
+                    <Clock className="h-4 w-4" />
+                    <span className="font-medium">{officeStatus}</span>
+                  </div>
+                  <div className="text-orange-700 text-xs mt-1">
+                    Timer is paused and will resume at 10 AM
+                  </div>
+                </div>
+              )}
+
               <div className="text-sm">
-                <div className="text-muted-foreground">Timer (Reference Only)</div>
+                <div className="text-muted-foreground">Timer</div>
                 {(() => {
                   const t = timerFor(planFor);
                   if (!t) return <div className="text-muted-foreground">—</div>;
@@ -556,7 +758,12 @@ export default function AdminOrdersMonitor() {
                     <div className="flex items-center gap-2">
                       <Clock className="h-4 w-4" />
                       <span className={t.ms > 0 ? "font-medium" : "font-medium text-destructive"}>
-                        {t.ms > 0 ? fmtCountdown(t.ms) : "Overdue"}
+                        {t.ms > 0 ? (
+                          <>
+                            {fmtCountdown(t.ms)}
+                            {!isOfficeOpen && <span className="text-orange-600 text-xs ml-1">(Paused)</span>}
+                          </>
+                        ) : "Overdue"}
                       </span>
                     </div>
                   );
@@ -564,17 +771,45 @@ export default function AdminOrdersMonitor() {
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <Input placeholder='Pickup Window' value={pickupWindow} onChange={(e) => setPickupWindow(e.target.value)} />
-                <Input placeholder="Pickup Address" value={pickupAddress} onChange={(e) => setPickupAddress(e.target.value)} />
-                <Input placeholder="Notes" value={notes} onChange={(e) => setNotes(e.target.value)} />
+                <Input
+                  placeholder='Pickup Window (e.g. "Today 4-6 PM")'
+                  value={pickupWindow}
+                  onChange={(e) => setPickupWindow(e.target.value)}
+                />
+                <Input
+                  placeholder="Pickup Address"
+                  value={pickupAddress}
+                  onChange={(e) => setPickupAddress(e.target.value)}
+                />
+                <Input
+                  placeholder="Notes (optional)"
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                />
                 <div />
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <Input placeholder="Partner Name" value={partnerName} onChange={(e) => setPartnerName(e.target.value)} />
-                <Input placeholder="Partner Phone" value={partnerPhone} onChange={(e) => setPartnerPhone(e.target.value)} />
-                <Input placeholder='ETA' value={etaText} onChange={(e) => setEtaText(e.target.value)} />
-                <Input placeholder="Tracking URL" value={trackingUrl} onChange={(e) => setTrackingUrl(e.target.value)} />
+                <Input
+                  placeholder="Delivery Partner Name"
+                  value={partnerName}
+                  onChange={(e) => setPartnerName(e.target.value)}
+                />
+                <Input
+                  placeholder="Delivery Partner Phone"
+                  value={partnerPhone}
+                  onChange={(e) => setPartnerPhone(e.target.value)}
+                />
+                <Input
+                  placeholder='ETA text (e.g. "Arriving in 45 min")'
+                  value={etaText}
+                  onChange={(e) => setEtaText(e.target.value)}
+                />
+                <Input
+                  placeholder="Tracking URL (optional)"
+                  value={trackingUrl}
+                  onChange={(e) => setTrackingUrl(e.target.value)}
+                />
               </div>
 
               <div className="flex flex-col sm:flex-row gap-3">
@@ -588,8 +823,7 @@ export default function AdminOrdersMonitor() {
               </div>
 
               <div className="text-xs text-muted-foreground">
-                 {/* Updated Text */}
-                 You can assign a pickup now. Current status: {badgeText(workflowFor(planFor))}
+                Planning works only when vendor has accepted (or admin overdue).
               </div>
             </div>
           )}
