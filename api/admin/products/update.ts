@@ -403,6 +403,14 @@ export default async function handler(req: any, res: any) {
         // Release SKU claim so vendor can reuse it later
         const claimRef = adminDb.collection("skuClaims").doc(skuClaimId(uid, sku));
         await claimRef.delete().catch(() => {});
+        
+                // Remove product ownership mapping (best-effort)
+        const productNum =
+          String(doc.shopifyProductNumericId || "").trim() ||
+          (shopifyProductId ? String(shopifyProductId).split("/").pop() || "" : "");
+        if (productNum) {
+          await adminDb.collection("shopifyProductOwners").doc(productNum).delete().catch(() => {});
+        }
 
         // Soft delete doc (or use ref.delete() if you prefer hard delete)
         await ref.set(

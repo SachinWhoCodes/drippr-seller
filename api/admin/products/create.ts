@@ -223,7 +223,9 @@ export default async function handler(req: any, res: any) {
     const numericVariantId = String(firstVariant.id).split("/").pop();
     const sellerStatus = "pending"; // unchanged
 
-    await docRef.set({
+        const shopifyProductNumericId = String(product.id).split("/").pop() || "";
+
+    const mirrorDoc = {
       id: docRef.id,
       merchantId,
       title,
@@ -234,7 +236,7 @@ export default async function handler(req: any, res: any) {
       published: false,
       sku,
       shopifyProductId: product.id,
-      shopifyProductNumericId: String(product.id).split("/").pop(),
+      shopifyProductNumericId,
       shopifyVariantIds: [firstVariant.id],
       shopifyVariantNumericIds: [numericVariantId],
       tags: shopifyTags,
@@ -242,7 +244,7 @@ export default async function handler(req: any, res: any) {
       // PERMANENT ONLY:
       image: cdnUrls[0] || null,
       images: cdnUrls,
-      imageUrls: cdnUrls,        // keep legacy field aligned
+      imageUrls: cdnUrls, // keep legacy field aligned
 
       stock: inventory?.quantity ?? null,
       vendor: vendor || "DRIPPR Marketplace",
@@ -251,6 +253,30 @@ export default async function handler(req: any, res: any) {
       adminNotes: null,
       createdAt: now,
       updatedAt: now,
+    };
+
+    // Stable product -> merchant mapping used by webhooks (prevents variant-orders from going missing)
+    const ownerRef = shopifyProductNumericId
+      ? adminDb.collection("shopifyProductOwners").doc(shopifyProductNumericId)
+      : null;
+
+    await adminDb.runTransaction(async (tx: any) => {
+      tx.set(docRef, mirrorDoc);
+
+      if (ownerRef) {
+        tx.set(
+          ownerRef,
+          {
+            shopifyProductNumericId,
+            shopifyProductId: product.id,
+            merchantId,
+            merchantProductDocId: docRef.id,
+            createdAt: now,
+            updatedAt: now,
+          },
+          { merge: true }
+        );
+      }
     });
 
     return res.status(200).json({

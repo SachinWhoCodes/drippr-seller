@@ -3,15 +3,10 @@ import crypto from "node:crypto";
 import { getAdmin } from "../../_lib/firebaseAdmin.js";
 import { FieldValue } from "firebase-admin/firestore";
 
-// If this is a Next.js pages/api route, this is REQUIRED for raw body HMAC verification.
-// (Safe to keep even if not used by your runtime.)
 export const config = {
-  api: {
-    bodyParser: false,
-  },
+  api: { bodyParser: false },
 };
 
-// Read raw body for HMAC verification
 async function readRawBody(req: any): Promise<Buffer> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) {
@@ -35,10 +30,8 @@ function safeVerifyShopifyHmac(rawBody: Buffer, secret: string, hmacHeader: stri
   if (!secret) return false;
   if (!hmacHeader) return false;
 
-  // Shopify sends base64 HMAC of raw body.
   const computed = crypto.createHmac("sha256", secret).update(rawBody).digest(); // Buffer
   let headerBuf: Buffer;
-
   try {
     headerBuf = Buffer.from(String(hmacHeader), "base64");
   } catch {
@@ -49,6 +42,15 @@ function safeVerifyShopifyHmac(rawBody: Buffer, secret: string, hmacHeader: stri
   return crypto.timingSafeEqual(computed, headerBuf);
 }
 
+type OwnerMapDoc = {
+  merchantId?: string;
+  merchantProductDocId?: string;
+  shopifyProductId?: string;
+  shopifyProductNumericId?: string;
+  createdAt?: number;
+  updatedAt?: number;
+};
+
 export default async function handler(req: any, res: any) {
   if (req.method !== "POST") return res.status(405).send("Method not allowed");
 
@@ -58,32 +60,22 @@ export default async function handler(req: any, res: any) {
   try {
     const rawBody = await readRawBody(req);
 
-    // 1) Verify HMAC + topic
     const hmacHeader = String(req.headers["x-shopify-hmac-sha256"] || "");
     const topic = String(req.headers["x-shopify-topic"] || "");
     const webhookId = String(req.headers["x-shopify-webhook-id"] || "");
 
     const ok = safeVerifyShopifyHmac(rawBody, secret, hmacHeader);
     if (!ok) return res.status(401).send("HMAC mismatch");
-
     if (topic !== "orders/create") return res.status(200).send("Ignored topic");
 
-    // 2) Parse payload
     const payload = JSON.parse(rawBody.toString("utf8"));
     const shopifyOrderId = String(payload.id || "");
     if (!shopifyOrderId) return res.status(400).send("Missing order id");
 
     const orderNumber = payload.name || payload.order_number || shopifyOrderId;
-
-    const createdAt = payload.created_at
-      ? new Date(payload.created_at).getTime()
-      : Date.now();
-
+    const createdAt = payload.created_at ? new Date(payload.created_at).getTime() : Date.now();
     const currency =
-      payload.currency ||
-      payload.total_price_set?.shop_money?.currency_code ||
-      "INR";
-
+      payload.currency || payload.total_price_set?.shop_money?.currency_code || "INR";
     const financialStatus = payload.financial_status || "pending";
     const lineItems = Array.isArray(payload.line_items) ? payload.line_items : [];
 
@@ -96,32 +88,67 @@ export default async function handler(req: any, res: any) {
 
     const { adminDb } = getAdmin();
 
-    // 3) Build product lookup maps (SKU primary, variant numeric fallback)
-    const skus: string[] = lineItems
-      .map((li: any) => String(li?.sku || "").trim())
+    // --- PRIMARY KEY: product_id ---
+    const productNums: string[] = lineItems
+      .map((li: any) => (li?.product_id != null ? String(li.product_id) : ""))
       .filter(Boolean);
 
+    // fallbacks
     const variantNums: string[] = lineItems
       .map((li: any) => (li?.variant_id != null ? String(li.variant_id) : ""))
       .filter(Boolean);
 
-    const skuToProduct = new Map<string, any>();
-    const variantNumToProduct = new Map<string, any>();
+    const skus: string[] = lineItems
+      .map((li: any) => String(li?.sku || "").trim())
+      .filter(Boolean);
 
-    // a) match by SKU
-    for (const part of chunk([...new Set(skus)], 10)) {
+    // 1) Fast mapping collection: shopifyProductOwners/{productId}
+    const productOwnerByNum = new Map<string, OwnerMapDoc>();
+    for (const part of chunk([...new Set(productNums)], 100)) {
       if (!part.length) continue;
-      const snap = await adminDb
+      const refs = part.map((p) => adminDb.collection("shopifyProductOwners").doc(p));
+      const snaps = await (adminDb as any).getAll(...refs);
+      for (const s of snaps) {
+        if (!s.exists) continue;
+        productOwnerByNum.set(String(s.id), (s.data() || {}) as OwnerMapDoc);
+      }
+    }
+
+    // 2) Fallback: merchantProducts by product numeric id (legacy-safe)
+    const productNumToProduct = new Map<string, any>();
+    const missingProductNums = [...new Set(productNums)].filter((p) => !productOwnerByNum.has(p));
+
+    for (const part of chunk(missingProductNums, 10)) {
+      if (!part.length) continue;
+
+      const snapNum = await adminDb
         .collection("merchantProducts")
-        .where("sku", "in", part)
+        .where("shopifyProductNumericId", "in", part)
         .get();
 
-      snap.forEach((doc: any) => {
-        skuToProduct.set(String(doc.get("sku")), { id: doc.id, ...(doc.data() as any) });
+      snapNum.forEach((doc: any) => {
+        const pnum = String(doc.get("shopifyProductNumericId") || "");
+        if (!pnum) return;
+        productNumToProduct.set(pnum, { id: doc.id, ...(doc.data() as any) });
+      });
+
+      // extra fallback for very old docs that only have gid
+      const gids = part.map((p) => `gid://shopify/Product/${p}`);
+      const snapGid = await adminDb
+        .collection("merchantProducts")
+        .where("shopifyProductId", "in", gids)
+        .get();
+
+      snapGid.forEach((doc: any) => {
+        const gid = String(doc.get("shopifyProductId") || "");
+        const pnum = gid.split("/").pop();
+        if (!pnum) return;
+        productNumToProduct.set(pnum, { id: doc.id, ...(doc.data() as any) });
       });
     }
 
-    // b) fallback: match by variant_id (REST numeric) stored as shopifyVariantNumericIds
+    // 3) Variant numeric fallback (only works if stored)
+    const variantNumToProduct = new Map<string, any>();
     for (const part of chunk([...new Set(variantNums)], 10)) {
       if (!part.length) continue;
 
@@ -132,36 +159,127 @@ export default async function handler(req: any, res: any) {
 
       snap.forEach((doc: any) => {
         const ids =
-          ((doc.get("shopifyVariantNumericIds") as (string | number)[] | undefined) ??
-            []) as (string | number)[];
+          ((doc.get("shopifyVariantNumericIds") as (string | number)[] | undefined) ?? []) as (
+            | string
+            | number
+          )[];
 
         const data = { id: doc.id, ...(doc.data() as any) };
         for (const n of ids) variantNumToProduct.set(String(n), data);
       });
     }
 
-    // 4) Group line items by merchant
+    // 4) SKU fallback (least reliable; kept for backward compatibility)
+    const skuToProduct = new Map<string, any>();
+    for (const part of chunk([...new Set(skus)], 10)) {
+      if (!part.length) continue;
+      const snap = await adminDb.collection("merchantProducts").where("sku", "in", part).get();
+      snap.forEach((doc: any) => {
+        skuToProduct.set(String(doc.get("sku")), { id: doc.id, ...(doc.data() as any) });
+      });
+    }
+
+    // Group line items by merchant
     const byMerchant = new Map<string, { items: any[]; subtotal: number }>();
+
+    // backfill mapping if we discovered owner via fallback
+    const ownerUpserts = new Map<string, OwnerMapDoc>();
 
     for (const li of lineItems) {
       const sku = String(li?.sku || "").trim();
       const variantNum = li?.variant_id != null ? String(li.variant_id) : "";
+      const productNum = li?.product_id != null ? String(li.product_id) : "";
 
-      let mp = sku ? skuToProduct.get(sku) : undefined;
-      if (!mp && variantNum) mp = variantNumToProduct.get(variantNum);
-      if (!mp) continue; // not a marketplace item we manage
+      let merchantId = "";
+      let merchantProductDocId: string | null = null;
+      let matchedBy: "ownerMap" | "productNumeric" | "variantId" | "sku" | "unknown" = "unknown";
 
-      const merchantId = String(mp.merchantId || "");
+      // A) product_id -> owner map (BEST)
+      if (productNum) {
+        const owner = productOwnerByNum.get(productNum);
+        if (owner?.merchantId) {
+          merchantId = String(owner.merchantId);
+          merchantProductDocId = owner.merchantProductDocId ? String(owner.merchantProductDocId) : null;
+          matchedBy = "ownerMap";
+        }
+      }
+
+      // B) product_id -> merchantProducts (fallback)
+      if (!merchantId && productNum) {
+        const mp = productNumToProduct.get(productNum);
+        if (mp?.merchantId) {
+          merchantId = String(mp.merchantId);
+          merchantProductDocId = mp?.id ? String(mp.id) : null;
+          matchedBy = "productNumeric";
+
+          ownerUpserts.set(productNum, {
+            merchantId,
+            merchantProductDocId: merchantProductDocId || undefined,
+            shopifyProductId: mp.shopifyProductId ? String(mp.shopifyProductId) : undefined,
+            shopifyProductNumericId: productNum,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          });
+        }
+      }
+
+      // C) variant_id fallback
+      if (!merchantId && variantNum) {
+        const mp = variantNumToProduct.get(variantNum);
+        if (mp?.merchantId) {
+          merchantId = String(mp.merchantId);
+          merchantProductDocId = mp?.id ? String(mp.id) : null;
+          matchedBy = "variantId";
+
+          const mpProductNum = mp.shopifyProductNumericId
+            ? String(mp.shopifyProductNumericId)
+            : mp.shopifyProductId
+            ? String(mp.shopifyProductId).split("/").pop()
+            : "";
+          if (mpProductNum) {
+            ownerUpserts.set(mpProductNum, {
+              merchantId,
+              merchantProductDocId: merchantProductDocId || undefined,
+              shopifyProductId: mp.shopifyProductId ? String(mp.shopifyProductId) : undefined,
+              shopifyProductNumericId: mpProductNum,
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+            });
+          }
+        }
+      }
+
+      // D) sku fallback
+      if (!merchantId && sku) {
+        const mp = skuToProduct.get(sku);
+        if (mp?.merchantId) {
+          merchantId = String(mp.merchantId);
+          merchantProductDocId = mp?.id ? String(mp.id) : null;
+          matchedBy = "sku";
+
+          const mpProductNum = mp.shopifyProductNumericId
+            ? String(mp.shopifyProductNumericId)
+            : mp.shopifyProductId
+            ? String(mp.shopifyProductId).split("/").pop()
+            : "";
+          if (mpProductNum) {
+            ownerUpserts.set(mpProductNum, {
+              merchantId,
+              merchantProductDocId: merchantProductDocId || undefined,
+              shopifyProductId: mp.shopifyProductId ? String(mp.shopifyProductId) : undefined,
+              shopifyProductNumericId: mpProductNum,
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+            });
+          }
+        }
+      }
+
       if (!merchantId) continue;
 
       const qty = toNumber(li?.quantity, 0);
-
-      // Shopify line item price often comes as string.
       const unitPrice =
-        li?.price != null
-          ? toNumber(li.price, 0)
-          : toNumber(li?.price_set?.shop_money?.amount, 0);
-
+        li?.price != null ? toNumber(li.price, 0) : toNumber(li?.price_set?.shop_money?.amount, 0);
       const lineTotal = unitPrice * qty;
 
       const bucket = byMerchant.get(merchantId) || { items: [], subtotal: 0 };
@@ -173,19 +291,22 @@ export default async function handler(req: any, res: any) {
         price: unitPrice,
         total: Number(lineTotal.toFixed(2)),
         variant_id: variantNum || null,
-        product_id: li?.product_id ?? null,
+        product_id: productNum || null,
+
+        // debugging trace
+        merchantProductDocId,
+        matchedBy,
       });
+
       bucket.subtotal += lineTotal;
       byMerchant.set(merchantId, bucket);
     }
 
-    // 5) SAFE idempotency + write everything atomically
-    // We MUST prevent duplicate merchantStats increments.
+    // Idempotency
     const eventId = webhookId || `order_${shopifyOrderId}`;
     const eventRef = adminDb.collection("webhookEvents").doc(eventId);
 
     const THREE_HOURS = 3 * 60 * 60 * 1000;
-
     let alreadyProcessed = false;
 
     await adminDb.runTransaction(async (tx: any) => {
@@ -195,9 +316,6 @@ export default async function handler(req: any, res: any) {
         return;
       }
 
-      // mark event in SAME transaction to avoid:
-      // - missing orders when batch fails
-      // - duplicate stats increments on retries
       tx.set(eventRef, {
         topic,
         shopifyOrderId,
@@ -205,15 +323,27 @@ export default async function handler(req: any, res: any) {
         merchantsCount: byMerchant.size,
       });
 
-      // If no matching marketplace items, we still record the event
-      // to avoid repeated retries forever.
       if (byMerchant.size === 0) {
+        tx.set(eventRef, { note: "no matching marketplace items" }, { merge: true });
+        return;
+      }
+
+      // Backfill/ensure mapping docs
+      for (const [productNum, owner] of ownerUpserts.entries()) {
+        if (!productNum || !owner?.merchantId) continue;
+        const ownerRef = adminDb.collection("shopifyProductOwners").doc(productNum);
         tx.set(
-          eventRef,
-          { note: "no matching marketplace items" },
+          ownerRef,
+          {
+            shopifyProductNumericId: productNum,
+            merchantId: String(owner.merchantId),
+            merchantProductDocId: owner.merchantProductDocId ? String(owner.merchantProductDocId) : null,
+            shopifyProductId: owner.shopifyProductId ? String(owner.shopifyProductId) : null,
+            createdAt: owner.createdAt || Date.now(),
+            updatedAt: Date.now(),
+          },
           { merge: true }
         );
-        return;
       }
 
       for (const [merchantId, group] of byMerchant.entries()) {
@@ -221,7 +351,6 @@ export default async function handler(req: any, res: any) {
         const orderRef = adminDb.collection("orders").doc(orderDocId);
 
         tx.set(orderRef, {
-          // existing fields
           shopifyOrderId,
           orderNumber,
           merchantId,
@@ -232,15 +361,12 @@ export default async function handler(req: any, res: any) {
           lineItems: group.items,
           subtotal: Number(group.subtotal.toFixed(2)),
           status: "open",
-
-          // helpful shortcut (UI can use this later)
           customerEmail,
 
           raw: payload.customer
             ? { customer: { id: payload.customer.id, email: payload.customer.email } }
             : {},
 
-          // ✅ NEW WORKFLOW FIELDS (your requested functionality starts here)
           workflowStatus: "vendor_pending",
           vendorAcceptBy: createdAt + THREE_HOURS,
           vendorAcceptedAt: null,
@@ -252,15 +378,10 @@ export default async function handler(req: any, res: any) {
           invoice: { status: "none" },
 
           workflowTimeline: [
-            {
-              at: Date.now(),
-              type: "vendor_pending",
-              note: "Order received; awaiting vendor acceptance",
-            },
+            { at: Date.now(), type: "vendor_pending", note: "Order received; awaiting vendor acceptance" },
           ],
         });
 
-        // keep existing stats logic (but now protected by idempotency transaction)
         const statsRef = adminDb.collection("merchantStats").doc(merchantId);
         tx.set(
           statsRef,
@@ -282,4 +403,3 @@ export default async function handler(req: any, res: any) {
     return res.status(500).send("server error");
   }
 }
-
