@@ -387,7 +387,7 @@ export default function AdminOrdersMonitor() {
 
     setBusy(true);
     try {
-      await authedJsonPost("/api/admin/assign-pickup", {
+      await authedJsonPost("https://drippr-seller-serverless.vercel.app/api/admin/assign-pickup", {
         orderId: planFor.id,
         pickupWindow,
         pickupAddress,
