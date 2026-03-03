@@ -47,6 +47,21 @@ export function useIsAdmin(): boolean {
 }
 
 
+export function assignPickup(payload: {
+  orderId: string;
+  pickupWindow?: string | null;
+  pickupAddress?: string | null;
+  notes?: string | null;
+  deliveryPartner?: {
+    name?: string | null;
+    phone?: string | null;
+    etaText?: string | null;
+    trackingUrl?: string | null;
+  };
+}) {
+  return call("orders.assignPickup", payload);
+}
+
 let _publicationIdCache: string | null | undefined; // undefined => not fetched yet
 
 /**

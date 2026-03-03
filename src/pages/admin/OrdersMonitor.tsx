@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { Search, Eye, ClipboardList, Clock, Download, Truck } from "lucide-react";
+import { assignPickup } from "@/lib/adminApi";
 
 import {
   Table,
@@ -61,7 +62,7 @@ type OrderDoc = {
   createdAt: number;
   subtotal?: number;
   currency?: string;
-
+  updatedAt?: number;
   status?: string; // open/closed
   financialStatus?: string;
 
@@ -123,6 +124,9 @@ function fmtCountdown(ms: number) {
 export default function AdminOrdersMonitor() {
   const [uid, setUid] = useState<string | null>(auth.currentUser?.uid ?? null);
 
+
+  const [planningOrder, setPlanningOrder] = useState<any | null>(null);
+  const [isPlanOpen, setIsPlanOpen] = useState(false);
   const [orders, setOrders] = useState<OrderDoc[]>([]);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
@@ -200,10 +204,13 @@ export default function AdminOrdersMonitor() {
   };
 
   const getAdminPlanByDeadline = (o: OrderDoc): number => {
-    if (o.adminPlanBy) {
-      return o.adminPlanBy;
-    }
-    const acceptedAt = o.vendorAcceptedAt || now;
+    if (o.adminPlanBy) return o.adminPlanBy;
+
+    const acceptedAt =
+      Number(o.vendorAcceptedAt || 0) ||
+      Number((o as any).updatedAt || 0) ||
+      o.createdAt;
+
     return addBusinessHours(acceptedAt, THIRTY_MIN);
   };
 
@@ -383,12 +390,12 @@ export default function AdminOrdersMonitor() {
   }
 
   async function submitPlan() {
-    if (!planFor) return;
+    if (!planFor?.id) return;
 
     setBusy(true);
     try {
-      await authedJsonPost("https://drippr-seller-serverless.vercel.app/api/admin/assign-pickup", {
-        orderId: planFor.id,
+      await assignPickup({
+        orderId: planFor.id, // ✅ FIX: use the selected order's Firestore doc id
         pickupWindow,
         pickupAddress,
         notes,

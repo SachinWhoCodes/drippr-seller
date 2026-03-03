@@ -204,6 +204,68 @@ export default async function handler(req: any, res: any) {
         );
         return res.status(200).json({ ok: true });
       }
+      
+      
+      // inside switch(action) { ... }
+
+case "orders.assignPickup": {
+  // body: { orderId, pickupWindow, pickupAddress, notes, deliveryPartner }
+  const body = req.body || {};
+  const orderId = String(body.orderId || "").trim();
+  if (!orderId) return res.status(400).json({ ok: false, error: "orderId is required" });
+
+  const pickupWindow = body.pickupWindow ?? null;
+  const pickupAddress = body.pickupAddress ?? null;
+  const notes = body.notes ?? null;
+
+  const dp = body.deliveryPartner || {};
+  const deliveryPartner = {
+    name: dp.name ?? null,
+    phone: dp.phone ?? null,
+    etaText: dp.etaText ?? null,
+    trackingUrl: dp.trackingUrl ?? null,
+  };
+
+  const orderRef = adminDb.collection("orders").doc(orderId);
+  const now = Date.now();
+
+  await adminDb.runTransaction(async (tx) => {
+    const snap = await tx.get(orderRef);
+    if (!snap.exists) {
+      const err: any = new Error("Order not found");
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const order = snap.data() as any;
+    const st = order?.workflowStatus || "vendor_pending";
+
+    // planning only after vendor accepted (or admin overdue)
+    if (!(st === "vendor_accepted" || st === "admin_overdue")) {
+      const err: any = new Error("Order is not ready for pickup assignment");
+      err.statusCode = 400;
+      err.currentStatus = st;
+      throw err;
+    }
+
+    // idempotent
+    if (st === "pickup_assigned" || st === "dispatched") return;
+
+    tx.set(
+      orderRef,
+      {
+        workflowStatus: "pickup_assigned",
+        adminPlannedAt: now,
+        pickupPlan: { pickupWindow, pickupAddress, notes },
+        deliveryPartner,
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+  });
+
+  return res.status(200).json({ ok: true, assignedAt: now });
+}
 
       default:
         return res.status(400).json({ ok: false, error: `Unknown action: ${action}` });
